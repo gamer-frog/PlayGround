@@ -1,786 +1,1338 @@
-// ══════════ HIDROPONÍA — main game logic ══════════
+// ══════════ HIDROPLAN · simulador de invernadero NFT ══════════
+// Presupuesto por módulos, lista de materiales, producción, economía y comparación de sistemas.
 import * as THREE from 'three';
-import { buildWorld, makePlantMesh } from './world.js';
-import { CROPS, CROP_IDS, MILESTONES, UPGRADES, rollPrices, rollContractOffers, netWorth } from './data.js';
-import { sfx, setMuted, isMuted } from './audio.js';
+import {
+  buildWorld, createModuleModel, makeFootprintHighlight,
+  TILE, COLS, ROWS, moduleCenter, worldToTile,
+} from './world.js';
+import {
+  CROPS, MODULES, defaultParams, moduleMaterialCost, consolidatedBOM, projectSummary,
+} from './data.js';
+import { fmtMoney, fmtNum, fmtQty, clamp, escapeHtml } from './format.js';
+import {
+  newScenario, cloneScenario, summaryFor, scenarioCounts,
+  moduleIncrement, expansionFor,
+} from './systems.js';
+import {
+  SHEET_TITLES, buildSheetHTML, moduleSheetHTML, materialsSheetHTML,
+  productionSheetHTML, systemsSheetHTML, economySheetHTML, menuSheetHTML,
+} from './sheets.js';
+import { sfx, unlockAudio } from './audio.js';
 
 const $ = (id) => document.getElementById(id);
-const DAY_LEN = 210;               // real seconds per in-game day
-const DAY_START = 6 * 60, DAY_END = 22 * 60;
-const SAVE_KEY = 'hidroponia.save.v1';
+const SAVE_KEY = 'hidroplan.nft.v1';
+const VIEW_H = 24;
+const MIN_ZOOM = 0.32, MAX_ZOOM = 2.7;
+const YAW = Math.PI / 4, PITCH = 0.72, CAM_DIST = 60;
+const camOffset = new THREE.Vector3(
+  Math.sin(YAW) * Math.cos(PITCH), Math.sin(PITCH), Math.cos(YAW) * Math.cos(PITCH),
+).multiplyScalar(CAM_DIST);
 
-/* ═══════════ STATE ═══════════ */
-const defaultState = () => ({
-  cash: 400, day: 1, timeMin: DAY_START,
-  seeds: { lettuce: 4, kale: 2, basil: 2, tomato: 1, strawberry: 0 },
-  produce: { lettuce: 0, kale: 0, basil: 0, tomato: 0, strawberry: 0 },
-  nutrient: 2, pesticide: 1,
-  selectedSeed: 'lettuce',
-  upgrades: { led2: false, led1: false, autoWater: false, autoDose: false, market: false, solar: false, racks2: false, racks4: false },
-  prices: rollPrices(),
-  offers: rollContractOffers(1),
-  activeContracts: [],
-  milestonesClaimed: [],
-  dayStats: { earned: 0, spent: 0, harvested: 0 },
+/* ══════════ ESTADO ══════════ */
+let project = { activeId: null, scenarios: [], nextModuleId: 1 };
+let modules = [];                 // módulos del sistema abierto (runtime + rec)
+let scene, camera, renderer, world, clock;
+let screen = 'title';
+let activeSheet = null;
+let selectedId = null;
+let placing = null;
+let camTarget = new THREE.Vector3(0, 0, 0);
+let camZoom = 0.52;
+let scaleUnits = 1;
+let expandType = 'nft12';
+let deleteArmed = null;
+let deleteScenarioArmed = null;
+let resetArmed = false;
+let newArmed = false;
+let titleModels = [];
+let hintReservoirShown = false;
+const titleCleanup = [];
+
+const currentScenario = () =>
+  project.scenarios.find((s) => s.id === project.activeId) || project.scenarios[0];
+const currentRecords = () => modules.map((m) => m.rec);
+const currentSummary = () => projectSummary(currentScenario().params, currentRecords());
+
+/* ══════════ ESCENA ══════════ */
+const selHighlight = makeFootprintHighlight(0xfbbf24);
+selHighlight.visible = false;
+const ghostMat = new THREE.MeshBasicMaterial({
+  color: 0x4ade80, transparent: true, opacity: 0.44, depthWrite: false,
 });
-
-let state = defaultState();
-let world = null;
-let scene, camera, renderer, clock;
-let screen = 'title';         // title | playing | paused | sleep
-let modal = null;             // null | shop | sell | contracts
-let currentInteract = null;   // { type, rack? }
-let yaw = 0, pitch = 0;
-const playerPos = new THREE.Vector3(0, 1.66, 6.4);
-const keys = {};
+const ghostHighlight = makeFootprintHighlight(0x4ade80);
+ghostHighlight.visible = false;
 const raycaster = new THREE.Raycaster();
-raycaster.far = 3.6;
+const pointerNdc = new THREE.Vector2();
+const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.02);
+const tempVec = new THREE.Vector3();
 
-/* ═══════════ BOOT / RENDERER ═══════════ */
 function init() {
-  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.08;
+  renderer.toneMappingExposure = 1.06;
   renderer.domElement.id = 'game-canvas';
   document.body.prepend(renderer.domElement);
 
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 220);
-  camera.rotation.order = 'YXZ';
-  camera.position.copy(playerPos);
+  camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 220);
+  scene.add(selHighlight, ghostHighlight);
 
   world = buildWorld(scene);
-  syncRacksFromState();
+  world.updateDaylight(0.56);
+  setViewport();
+  camTarget.set(0, 0, 1);
+  camZoom = titleZoom();
+  updateCamera();
 
   clock = new THREE.Clock();
-  window.addEventListener('resize', onResize);
   bindUI();
-  bindInput();
+  bindTouch();
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', () => setTimeout(onResize, 250));
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && screen === 'playing') saveProject(false);
+  });
 
-  // autostart param for quick testing: ?autostart=1
-  const params = new URLSearchParams(window.location.search);
-  if (params.get('autostart') === '1') {
-    newGame(false);
-  } else {
-    $('btn-continue').style.visibility = localStorage.getItem(SAVE_KEY) ? 'visible' : 'hidden';
-  }
+  updateContinueButton();
+  buildTitleShowcase();
+
+  const query = new URLSearchParams(window.location.search);
+  if (query.get('autostart') === '1') startNewProject(true);
+  else renderTitle();
+
   animate();
 }
 
-function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
+function setViewport() {
+  const aspect = window.innerWidth / window.innerHeight;
+  const top = VIEW_H / 2, bottom = -VIEW_H / 2;
+  camera.left = -(VIEW_H * aspect) / 2;
+  camera.right = (VIEW_H * aspect) / 2;
+  camera.top = top; camera.bottom = bottom;
   camera.updateProjectionMatrix();
+}
+
+function titleZoom() {
+  return window.innerWidth < window.innerHeight ? 0.54 : 0.84;
+}
+function gameZoom() {
+  return window.innerWidth < window.innerHeight ? 0.52 : 0.84;
+}
+
+function onResize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
+  setViewport();
+  if (screen === 'title') camZoom = titleZoom();
+  updateCamera();
 }
 
-/* ═══════════ SAVE / LOAD ═══════════ */
-function serialize() {
-  return JSON.stringify({
-    ...state,
-    racks: world.racks.map(r => ({ unlocked: r.unlocked, data: r.data })),
-  });
+function updateCamera() {
+  camTarget.x = clamp(camTarget.x, -16, 16);
+  camTarget.z = clamp(camTarget.z, -12, 12);
+  camera.position.copy(camTarget).add(camOffset);
+  camera.lookAt(camTarget);
+  camera.zoom = camZoom;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
 }
-function saveGame(showToast = true) {
-  try {
-    localStorage.setItem(SAVE_KEY, serialize());
-    if (showToast) toast('💾 Game saved.', 'info');
-    $('btn-continue').style.visibility = 'visible';
-  } catch (e) { toast('Could not save: ' + e.message, 'bad'); }
+function panBy(dx, dy) {
+  const wpp = (VIEW_H / camZoom) / window.innerHeight;
+  const right = tempVec.setFromMatrixColumn(camera.matrixWorld, 0).clone();
+  const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+  const groundUp = new THREE.Vector3(up.x, 0, up.z);
+  if (groundUp.lengthSq() < 0.001) groundUp.set(0, 0, -1);
+  groundUp.normalize();
+  camTarget.addScaledVector(right, -dx * wpp);
+  camTarget.addScaledVector(groundUp, dy * wpp);
+  updateCamera();
 }
-function loadGame() {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return false;
-    const s = JSON.parse(raw);
-    state = { ...defaultState(), ...s };
-    for (const r of world.racks) {
-      const saved = s.racks && s.racks[r.index];
-      if (saved) { r.unlocked = saved.unlocked; r.data = { ...r.data, ...saved.data }; }
-      r.group.visible = r.unlocked;
-      r.stageCache = -1; r.cropCache = null;
-      refreshRackVisual(r, true);
-    }
-    return true;
-  } catch (e) { console.error(e); return false; }
-}
-function syncRacksFromState() {
-  for (const r of world.racks) { r.stageCache = -1; r.cropCache = null; refreshRackVisual(r, true); }
-}
-function applyUnlocks() {
-  for (const r of world.racks) {
-    if (r.index === 4 || r.index === 5) r.unlocked = state.upgrades.racks2;
-    if (r.index === 6 || r.index === 7) r.unlocked = state.upgrades.racks4;
-    if (r.index < 4) r.unlocked = true;
-    r.group.visible = r.unlocked;
-  }
+function zoomBy(factor) {
+  camZoom = clamp(camZoom * factor, MIN_ZOOM, MAX_ZOOM);
+  updateCamera();
 }
 
-/* ═══════════ UI HELPERS ═══════════ */
+/* ══════════ TOASTS ══════════ */
 function toast(msg, type = 'info') {
   const box = $('toasts');
   const el = document.createElement('div');
   el.className = 'toast' + (type === 'info' ? '' : ' ' + type);
   el.innerHTML = msg;
   box.appendChild(el);
-  while (box.children.length > 5) box.removeChild(box.firstChild);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translateX(30px)'; setTimeout(() => el.remove(), 350); }, 4600);
+  while (box.children.length > 3) box.removeChild(box.firstChild);
+  setTimeout(() => {
+    el.style.transition = 'opacity .3s, transform .3s';
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(-8px)';
+    setTimeout(() => el.remove(), 320);
+  }, 3600);
 }
-function refreshRackVisual(rack, force = false) {
-  const stage = !rack.data.crop ? -1 : rack.data.growth < 15 ? 0 : rack.data.growth < 50 ? 1 : 2;
-  if (!force && stage === rack.stageCache && rack.cropCache === rack.data.crop) { updateRackFlags(rack); return; }
-  rack.stageCache = stage; rack.cropCache = rack.data.crop;
-  // clear old plants
-  while (rack.plantsG.children.length) {
-    const c = rack.plantsG.children.pop();
-    c.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
-    rack.plantsG.remove(c);
+
+/* ══════════ GUARDADO ══════════ */
+function normalizeModuleData(rec, params) {
+  const def = MODULES[rec.type];
+  if (!def) return {};
+  if (def.kind !== 'nft') return { ...(rec.data || {}) };
+  const crop = CROPS[rec.data?.crop] ? rec.data.crop : (params.defaultCrop || 'lettuce');
+  const plants = clamp(
+    Math.round(Number(rec.data?.plants) || def.plants),
+    def.plantMin || 1, def.plantMax || def.plants,
+  );
+  return { crop, plants };
+}
+
+function normalizeScenario(s) {
+  const base = defaultParams();
+  const source = s.params || {};
+  const params = { ...base, ...source };
+  params.crops = {};
+  for (const id of Object.keys(base.crops)) {
+    params.crops[id] = { ...base.crops[id], ...(source.crops?.[id] || {}) };
   }
-  if (rack.data.crop) {
-    const def = CROPS[rack.data.crop];
-    for (const slot of rack.slots) {
-      const p = makePlantMesh(rack.data.crop, def, rack.data.growth);
-      p.position.copy(slot);
-      p.rotation.y = Math.random() * Math.PI * 2;
-      rack.plantsG.add(p);
+  const mods = (Array.isArray(s.modules) ? s.modules : [])
+    .filter((rec) => rec && MODULES[rec.type])
+    .map((rec) => ({
+      id: Number(rec.id) || 0,
+      type: rec.type,
+      col: clamp(Number(rec.col) || 0, 0, COLS - 1),
+      row: clamp(Number(rec.row) || 0, 0, ROWS - 1),
+      rot: Number(rec.rot) ? 1 : 0,
+      data: normalizeModuleData(rec, params),
+    }));
+  return {
+    id: s.id || 's' + Math.random().toString(36).slice(2, 9),
+    name: String(s.name || 'Sistema').slice(0, 40),
+    params,
+    modules: mods,
+  };
+}
+
+function serializeProject() {
+  return JSON.stringify({
+    version: 1,
+    activeId: project.activeId,
+    nextModuleId: project.nextModuleId,
+    scenarios: project.scenarios.map((s) => ({
+      id: s.id, name: s.name, params: s.params, modules: s.modules,
+    })),
+  });
+}
+
+function saveProject(show = false) {
+  try {
+    localStorage.setItem(SAVE_KEY, serializeProject());
+    updateContinueButton();
+    if (show) {
+      toast('💾 Proyecto guardado');
+      sfx.cash();
     }
-  }
-  updateRackFlags(rack);
-}
-function updateRackFlags(rack) {
-  rack.aphids.visible = !!rack.data.pests;
-  rack.wrench.visible = !!rack.data.broken;
-  for (const m of rack.ledMats) {
-    m.emissiveIntensity = rack.data.broken ? 0.03 : 2.1;
-    m.emissive.setHex(rack.data.broken ? 0x444444 : 0xfff7ae);
+  } catch (e) {
+    if (show) toast('No se pudo guardar en este navegador', 'bad');
   }
 }
 
-/* ═══════════ ECONOMY HELPERS ═══════════ */
-const sellPrice = (id) => Math.round(state.prices[id] * (state.upgrades.market ? 1.15 : 1));
-const cropSellTotal = () => CROP_IDS.reduce((s, id) => s + state.produce[id] * sellPrice(id), 0);
-function operatingCost() { return state.upgrades.solar ? 22 : 45; }
-function ledBonus() { return state.upgrades.led2 ? 1.5 : state.upgrades.led1 ? 1.25 : 1; }
-function spend(amount) { state.cash -= amount; state.dayStats.spent += amount; }
-function earn(amount) { state.cash += amount; state.dayStats.earned += amount; }
-function checkMilestones() {
-  const worth = netWorth(state, world.racks);
-  for (const m of MILESTONES) {
-    if (worth >= m.worth && !state.milestonesClaimed.includes(m.name)) {
-      state.milestonesClaimed.push(m.name);
-      state.cash += m.reward; state.dayStats.earned += m.reward;
-      $('milestone-name').textContent = m.name;
-      $('milestone-reward').textContent = `Net worth $${m.worth.toLocaleString()} · +$${m.reward} bonus`;
-      $('milestone-toast').classList.remove('hidden');
-      sfx.success();
-      setTimeout(() => $('milestone-toast').classList.add('hidden'), 5200);
+function loadProject() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data.scenarios) || !data.scenarios.length) return false;
+    project = {
+      activeId: data.activeId || data.scenarios[0].id,
+      scenarios: data.scenarios.map(normalizeScenario),
+      nextModuleId: Number(data.nextModuleId) || 1,
+    };
+    let maxId = 0;
+    for (const s of project.scenarios) for (const rec of s.modules) maxId = Math.max(maxId, rec.id);
+    project.nextModuleId = Math.max(project.nextModuleId, maxId + 1);
+    if (!project.scenarios.some((s) => s.id === project.activeId)) {
+      project.activeId = project.scenarios[0].id;
     }
+    loadScenarioRuntime(currentScenario());
+    return true;
+  } catch (e) {
+    console.error(e);
+    return false;
   }
 }
 
-/* ═══════════ HUD ═══════════ */
-function updateHUD() {
-  $('hud-cash').textContent = '$' + Math.floor(state.cash).toLocaleString();
-  $('hud-networth').textContent = 'Net worth $' + netWorth(state, world.racks).toLocaleString();
-  $('hud-day').textContent = 'Day ' + state.day;
-  const h = Math.floor(state.timeMin / 60), m = Math.floor(state.timeMin % 60);
-  $('hud-clock').textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  $('hud-contracts').textContent = `${state.activeContracts.length} contract${state.activeContracts.length === 1 ? '' : 's'}`;
-  // milestone
-  const next = MILESTONES.find(m => !state.milestonesClaimed.includes(m.name));
-  $('hud-milestone').textContent = next ? `$${next.worth.toLocaleString()} — ${next.name}` : '🏆 All milestones reached!';
-  // prices ticker
-  $('hud-prices').innerHTML = CROP_IDS.map(id => {
-    const up = state.prices[id] >= CROPS[id].sell;
-    return `<span>${CROPS[id].icon} $${state.prices[id]}<i class="${up ? 'price-up' : 'price-down'}">${up ? '▲' : '▼'}</i></span>`;
-  }).join('');
-  // hotbar
-  $('hotbar').innerHTML = CROP_IDS.map((id, i) => `
-    <div class="hotbar-slot ${state.selectedSeed === id ? 'selected' : ''}" data-crop="${id}">
-      <div class="hb-key">${i + 1}</div>
-      <div class="hb-icon">${CROPS[id].icon}</div>
-      <div class="hb-name">${CROPS[id].name}</div>
-      <div class="hb-count">×${state.seeds[id]}</div>
-    </div>`).join('');
-  $('hud-nutrient').textContent = state.nutrient;
-  $('hud-pesticide').textContent = state.pesticide;
-  // day progress
-  const t = (state.timeMin - DAY_START) / (DAY_END - DAY_START);
-  $('daybar-fill').style.width = (t * 100).toFixed(1) + '%';
-  $('daybar-sun').style.left = (t * 100).toFixed(1) + '%';
+function updateContinueButton() {
+  const button = $('btn-continue');
+  if (button) button.classList.toggle('hidden', !localStorage.getItem(SAVE_KEY));
 }
 
-/* rack inspector */
-function updateRackPanel() {
-  const r = currentInteract && currentInteract.type === 'rack' ? currentInteract.rack : null;
-  const panel = $('rack-panel');
-  if (!r) { panel.classList.add('hidden'); return; }
-  panel.classList.remove('hidden');
-  const d = r.data;
-  $('rp-index').textContent = (r.index + 1);
-  $('rp-crop').textContent = d.crop ? `${CROPS[d.crop].icon} ${CROPS[d.crop].name}${d.growth >= 100 ? ' — READY!' : ''}` : 'Empty rack — plant seeds (E)';
-  $('rp-growth').style.width = d.crop ? d.growth + '%' : '0%';
-  $('rp-water').style.width = d.water + '%';
-  $('rp-nutr').style.width = d.nutr + '%';
-  $('rp-health').style.width = d.health + '%';
-  $('rp-ph').textContent = 'pH ' + d.ph.toFixed(2);
-  $('rp-ph').style.color = (d.ph >= 5.9 && d.ph <= 7.0) ? '#4ade80' : '#f87171';
-  $('rp-flags').textContent = [d.broken ? '⚡ LIGHT OUT' : '', d.pests ? '🐛 PESTS!' : ''].filter(Boolean).join(' ');
-}
-
-/* ═══════════ PROMPT ═══════════ */
-function updatePrompt() {
-  const el = $('prompt');
-  if (!currentInteract || screen !== 'playing' || modal) { el.classList.add('hidden'); return; }
-  let text = '';
-  const ci = currentInteract;
-  if (ci.type === 'rack') {
-    const d = ci.rack.data, sel = state.selectedSeed;
-    if (d.broken) text = `[E] Repair light fixture ($15)`;
-    else if (!d.crop) text = state.seeds[sel] > 0
-      ? `[E] Plant ${CROPS[sel].name} seed  (have ${state.seeds[sel]})`
-      : `No ${CROPS[sel].name} seeds — press [B] to buy`;
-    else if (d.growth >= 100) text = `[E] 🌾 Harvest ${CROPS[d.crop].name}!`;
-    else text = `${CROPS[d.crop].name} growing… ${Math.floor(d.growth)}%`;
-    text += `\n[F] Water   [C] Nutrient   [V] pH $4   [X] Spray`;
-  } else if (ci.type === 'tank') text = `[E] Inspect nutrient tank`;
-  else if (ci.type === 'mixer') text = `[E] Mix nutrient batch — $25 → +2 units`;
-  else if (ci.type === 'computer') text = `[E] Open VerdiaOS — Contracts & Deliveries`;
-  else if (ci.type === 'stall') text = `[E] Open Market Stall — Sell produce`;
-  if (!text) { el.classList.add('hidden'); return; }
-  el.textContent = text;
-  el.classList.remove('hidden');
-}
-
-/* ═══════════ MODALS ═══════════ */
-function openModal(name) {
-  modal = name;
-  document.exitPointerLock?.();
-  $('prompt').classList.add('hidden');
-  $('rack-panel').classList.add('hidden');
-  renderModal(name);
-  $(name + '-modal').classList.remove('hidden');
-}
-function closeModal() {
-  if (!modal) return;
-  $(modal + '-modal').classList.add('hidden');
-  modal = null;
-  if (screen === 'playing') lockPointer();
-}
-function renderModal(name) {
-  if (name === 'shop') renderShop();
-  else if (name === 'sell') renderSell();
-  else if (name === 'contracts') renderContracts();
-}
-
-/* ── shop ── */
-function renderShop() {
-  $('shop-cash').textContent = '$' + Math.floor(state.cash).toLocaleString();
-  $('shop-seeds').innerHTML = CROP_IDS.map(id => {
-    const c = CROPS[id];
-    return `<div class="shop-item">
-      <div class="si-icon">${c.icon}</div>
-      <div class="si-body"><div class="si-name">${c.name} Seed</div><div class="si-desc">grows in ${c.growTime}s · sells ~$${c.sell}</div></div>
-      <button class="buy-btn" data-buy-seed="${id}" ${state.cash < c.seedCost ? 'disabled' : ''}>$${c.seedCost}</button>
-      <button class="buy-btn" data-buy-seed5="${id}" ${state.cash < c.seedCost * 5 ? 'disabled' : ''}>×5 $${c.seedCost * 5}</button>
-    </div>`;
-  }).join('');
-  $('shop-supplies').innerHTML = `
-    <div class="shop-item"><div class="si-icon">🧴</div><div class="si-body"><div class="si-name">Pesticide</div><div class="si-desc">cures aphid outbreaks</div></div>
-      <button class="buy-btn" data-buy-pesticide="1" ${state.cash < 18 ? 'disabled' : ''}>$18</button></div>
-    <div class="shop-item"><div class="si-icon">🧪</div><div class="si-body"><div class="si-name">Nutrient Concentrate</div><div class="si-desc">+2 nutrient units (or mix at the station)</div></div>
-      <button class="buy-btn" data-buy-nutrient="1" ${state.cash < 25 ? 'disabled' : ''}>+2 · $25</button></div>`;
-  $('shop-upgrades').innerHTML = UPGRADES.map(u => {
-    const owned = state.upgrades[u.id];
-    const locked = u.needs && !state.upgrades[u.needs];
-    const afford = state.cash >= u.cost;
-    let btn;
-    if (owned) btn = `<button class="buy-btn owned" disabled>OWNED ✓</button>`;
-    else if (locked) btn = `<button class="buy-btn" disabled>NEEDS ${u.needs === 'racks2' ? 'ROW B' : 'LV.1'}</button>`;
-    else btn = `<button class="buy-btn" data-buy-upgrade="${u.id}" ${afford ? '' : 'disabled'}>$${u.cost.toLocaleString()}</button>`;
-    return `<div class="shop-item"><div class="si-icon">${u.icon}</div>
-      <div class="si-body"><div class="si-name">${u.name}</div><div class="si-desc">${u.desc}</div></div>${btn}</div>`;
-  }).join('');
-}
-function buySeed(id, qty) {
-  const cost = CROPS[id].seedCost * qty;
-  if (state.cash < cost) return sfx.error();
-  spend(cost); state.seeds[id] += qty;
-  sfx.click(); renderShop(); updateHUD();
-}
-function buyUpgrade(id) {
-  const u = UPGRADES.find(x => x.id === id);
-  if (!u || state.upgrades[id] || state.cash < u.cost) return sfx.error();
-  spend(u.cost); state.upgrades[id] = true;
-  if (id === 'racks2' || id === 'racks4') applyUnlocks();
-  sfx.build();
-  toast(`${u.icon} <b>${u.name}</b> installed!`);
-  renderShop(); updateHUD(); checkMilestones();
-}
-
-/* ── sell ── */
-function renderSell() {
-  $('sell-cash').textContent = '$' + Math.floor(state.cash).toLocaleString();
-  const rows = CROP_IDS.filter(id => state.produce[id] > 0);
-  if (!rows.length) {
-    $('sell-rows').innerHTML = `<div class="sell-empty">Your storage is empty.<br>Harvest ready crops with <b>E</b> first!</div>`;
-    $('sell-total').textContent = '$0';
-  } else {
-    $('sell-rows').innerHTML = rows.map(id => {
-      const q = state.produce[id], p = sellPrice(id);
-      const base = CROPS[id].sell, up = state.prices[id] >= base;
-      return `<div class="sell-row">
-        <span style="font-size:24px">${CROPS[id].icon}</span>
-        <span class="sell-name">${CROPS[id].name} <small class="dim">×${q}</small></span>
-        <span class="sell-price">$${p} <small class="${up ? 'price-up' : 'price-down'}">${up ? '▲' : '▼'}</small></span>
-        <button class="buy-btn" data-sell-one="${id}">SELL $${q * p}</button>
-      </div>`;
-    }).join('');
-    $('sell-total').textContent = '$' + cropSellTotal().toLocaleString();
+/* ══════════ SISTEMAS ══════════ */
+function clearRuntimeModules() {
+  for (const m of modules) {
+    scene.remove(m.group);
+    disposeGroup(m.group);
   }
-}
-function sellAll() {
-  const total = cropSellTotal();
-  if (total <= 0) return sfx.error();
-  for (const id of CROP_IDS) state.produce[id] = 0;
-  earn(total);
-  sfx.cash();
-  toast(`🏪 Sold the whole harvest for <b>$${total.toLocaleString()}</b>!`);
-  renderSell(); updateHUD(); checkMilestones();
-}
-function sellOne(id) {
-  const q = state.produce[id]; if (!q) return;
-  const total = q * sellPrice(id);
-  state.produce[id] = 0; earn(total);
-  sfx.cash(); renderSell(); updateHUD(); checkMilestones();
+  modules = [];
+  selectedId = null;
+  selHighlight.visible = false;
 }
 
-/* ── contracts ── */
-function renderContracts() {
-  $('contracts-day').textContent = 'Day ' + state.day;
-  const act = $('active-contracts');
-  if (!state.activeContracts.length) act.innerHTML = `<div class="contract-empty">No active contracts.<br>Accept offers on the right →</div>`;
-  else act.innerHTML = state.activeContracts.map(c => {
-    const have = state.produce[c.crop], ok = have >= c.qty, daysLeft = c.deadline - state.day;
-    return `<div class="contract-card">
-      <div class="cc-client">🍽️ ${c.client}</div>
-      <div class="cc-detail">${CROPS[c.crop].icon} <b>${c.qty}× ${CROPS[c.crop].name}</b> — reward <span class="cc-reward">$${c.reward.toLocaleString()}</span></div>
-      <div class="cc-deadline">${daysLeft <= 0 ? '⚠️ Due TODAY' : `Due Day ${c.deadline} (${daysLeft}d left)`} · you have ${have}/${c.qty}</div>
-      <div class="cc-actions"><button class="buy-btn" data-deliver="${c.id}" ${ok ? '' : 'disabled'}>🚚 DELIVER (${have}/${c.qty})</button></div>
-    </div>`;
-  }).join('');
-  const off = $('offer-contracts');
-  if (!state.offers.length) off.innerHTML = `<div class="contract-empty">No offers today. Check back tomorrow!</div>`;
-  else off.innerHTML = state.offers.map(c => `
-    <div class="contract-card">
-      <div class="cc-client">📨 ${c.client}</div>
-      <div class="cc-detail">${CROPS[c.crop].icon} <b>${c.qty}× ${CROPS[c.crop].name}</b> — reward <span class="cc-reward">$${c.reward.toLocaleString()}</span></div>
-      <div class="cc-deadline">Deadline Day ${c.deadline}</div>
-      <div class="cc-actions"><button class="buy-btn" data-accept="${c.id}" ${state.activeContracts.length >= 4 ? 'disabled' : ''}>✍️ ACCEPT</button></div>
-    </div>`).join('');
-}
-function acceptOffer(id) {
-  const i = state.offers.findIndex(o => o.id === id);
-  if (i < 0 || state.activeContracts.length >= 4) return sfx.error();
-  state.activeContracts.push(state.offers.splice(i, 1)[0]);
-  sfx.click(); renderContracts(); updateHUD();
-}
-function deliverContract(id) {
-  const i = state.activeContracts.findIndex(c => c.id === id);
-  if (i < 0) return;
-  const c = state.activeContracts[i];
-  if (state.produce[c.crop] < c.qty) return sfx.error();
-  state.produce[c.crop] -= c.qty;
-  earn(c.reward);
-  state.activeContracts.splice(i, 1);
-  sfx.cash();
-  toast(`🚚 Delivered to <b>${c.client}</b> — earned <b>$${c.reward.toLocaleString()}</b>!`);
-  renderContracts(); updateHUD(); checkMilestones();
-}
-
-/* ═══════════ GAME FLOW ═══════════ */
-function newGame(lock = true) {
-  state = defaultState();
-  for (const r of world.racks) { r.unlocked = r.index < 4; r.group.visible = r.unlocked; r.data = { crop: null, growth: 0, water: 80, nutr: 60, ph: 6.5, health: 100, pests: false, broken: false }; r.stageCache = -1; r.cropCache = null; refreshRackVisual(r, true); }
-  applyUnlocks();
-  playerPos.set(0, 1.66, 6.4); yaw = 0; pitch = 0;
-  dayStatsReset();
-  startPlaying(lock);
-  toast('🌱 Welcome to Verdia Farms! Look at a rack and press <b>E</b> to plant.');
-  setTimeout(() => screen === 'playing' && toast('💧 Crops need water, nutrients and balanced pH — check the rack panel.'), 2600);
-  setTimeout(() => screen === 'playing' && toast('🏪 Press <b>B</b> for the shop · market stall is front-right · office is front-left.'), 5600);
-}
-function dayStatsReset() { state.dayStats = { earned: 0, spent: 0, harvested: 0 }; }
-
-function startPlaying(lock = true) {
-  screen = 'playing';
-  $('title-screen').classList.add('hidden');
-  $('pause-screen').classList.add('hidden');
-  $('sleep-screen').classList.add('hidden');
-  $('hud').classList.remove('hidden');
+function loadScenarioRuntime(scenario) {
+  clearRuntimeModules();
+  if (!scenario) return;
+  for (const rec of scenario.modules) placeRuntime(rec);
+  camTarget.set(0, 0, 0);
+  camZoom = gameZoom();
+  updateCamera();
   updateHUD();
-  if (lock) lockPointer();
-}
-function lockPointer() {
-  try { renderer.domElement.requestPointerLock?.(); } catch (e) { /* headless */ }
-}
-function togglePause() {
-  if (screen !== 'playing' && screen !== 'paused') return;
-  if (screen === 'paused') {
-    screen = 'playing';
-    $('pause-screen').classList.add('hidden');
-    lockPointer();
-  } else {
-    screen = 'paused';
-    document.exitPointerLock?.();
-    $('pause-screen').classList.remove('hidden');
-  }
-}
-function sleep() {
-  screen = 'sleep';
-  modal = null;
-  document.exitPointerLock?.();
-  $('prompt').classList.add('hidden');
-  $('rack-panel').classList.add('hidden');
-  sfx.sleep();
-  const cost = operatingCost();
-  $('sleep-title').textContent = `🌙 Day ${state.day} Complete`;
-  $('sleep-summary').innerHTML = `
-    <div>💰 Revenue today: <b>$${state.dayStats.earned.toLocaleString()}</b></div>
-    <div>💸 Expenses today: <b>$${state.dayStats.spent.toLocaleString()}</b></div>
-    <div>🌾 Crops harvested: <b>${state.dayStats.harvested}</b></div>
-    <div>🧾 Operating costs (power + water): <b>−$${cost}</b></div>`;
-  $('btn-next-day').textContent = `☀️ START DAY ${state.day + 1}`;
-  $('sleep-screen').classList.remove('hidden');
-}
-function nextDay() {
-  // deduct operating costs
-  const cost = operatingCost();
-  state.cash -= cost;
-  // expire contracts
-  const expired = state.activeContracts.filter(c => c.deadline < state.day + 1);
-  for (const c of expired) toast(`⌛ Contract with ${c.client} expired.`, 'bad');
-  state.activeContracts = state.activeContracts.filter(c => c.deadline >= state.day + 1);
-  // advance day
-  state.day += 1;
-  state.timeMin = DAY_START;
-  state.prices = rollPrices();
-  state.offers = rollContractOffers(state.day);
-  dayStatsReset();
-  // random events
-  const plantedRacks = world.racks.filter(r => r.unlocked && r.data.crop && !r.data.pests);
-  if (plantedRacks.length && Math.random() < 0.4) {
-    const r = plantedRacks[Math.floor(Math.random() * plantedRacks.length)];
-    r.data.pests = true; updateRackFlags(r);
-    setTimeout(() => toast(`🐛 Aphids detected on <b>Rack ${r.index + 1}</b>! Spray with <b>X</b>.`, 'warn'), 900);
-  }
-  const anyRacks = world.racks.filter(r => r.unlocked && !r.data.broken);
-  if (anyRacks.length && Math.random() < 0.16) {
-    const r = anyRacks[Math.floor(Math.random() * anyRacks.length)];
-    r.data.broken = true; updateRackFlags(r);
-    setTimeout(() => toast(`⚡ Light fixture failed on <b>Rack ${r.index + 1}</b>! Repair with <b>E</b> ($15).`, 'warn'), 1600);
-  }
-  $('sleep-screen').classList.add('hidden');
-  screen = 'playing';
-  saveGame(false);
-  updateHUD();
-  lockPointer();
 }
 
-/* ═══════════ INTERACTIONS ═══════════ */
-function findInteract() {
-  raycaster.setFromCamera({ x: 0, y: 0 }, camera);
-  const hits = raycaster.intersectObjects(world.interactables, true);
-  for (const hit of hits) {
-    let o = hit.object;
-    while (o && !o.userData.type) o = o.parent;
-    if (!o) continue;
-    const t = o.userData.type;
-    if (t === 'rack') {
-      const idx = o.userData.rackIndex ?? 0;
-      const rack = world.racks.find(r => r.index === idx);
-      if (!rack || !rack.unlocked) return null;
-      return { type: 'rack', rack };
-    }
-    return { type: t };
-  }
-  return null;
-}
-function doInteract() {
-  if (!currentInteract) return;
-  const ci = currentInteract;
-  if (ci.type === 'rack') {
-    const d = ci.rack.data;
-    if (d.broken) {
-      if (state.cash < 15) return toast('Need $15 to repair.', 'bad'), sfx.error();
-      spend(15); d.broken = false; updateRackFlags(ci.rack);
-      sfx.build(); toast('🔧 Light fixture repaired.');
-      updateHUD(); return;
-    }
-    if (!d.crop) {
-      const sel = state.selectedSeed;
-      if (state.seeds[sel] <= 0) { toast(`No ${CROPS[sel].name} seeds left — press <b>B</b> to buy.`, 'warn'); return sfx.error(); }
-      state.seeds[sel]--;
-      Object.assign(d, { crop: sel, growth: 3, water: Math.max(d.water, 75), nutr: Math.max(d.nutr, 55), health: 100, pests: false, ph: 6.5, readyNotified: false });
-      refreshRackVisual(ci.rack, true);
-      sfx.plant(); toast(`🌱 Planted ${CROPS[sel].name} in Rack ${ci.rack.index + 1}.`);
-      updateHUD(); return;
-    }
-    if (d.growth >= 100) {
-      const def = CROPS[d.crop];
-      state.produce[d.crop] += def.yield;
-      state.dayStats.harvested += def.yield;
-      d.crop = null; d.growth = 0; d.pests = false; d.readyNotified = false;
-      refreshRackVisual(ci.rack, true);
-      sfx.harvest();
-      toast(`🌾 Harvested <b>${def.yield}× ${def.name}</b>! Sell it at the stall.`);
-      updateHUD(); return;
-    }
-    toast(`${CROPS[d.crop].name} is at ${Math.floor(d.growth)}% — keep caring for it!`);
-    sfx.blip(); return;
-  }
-  if (ci.type === 'tank') { sfx.blip(); toast('💧 Water tank: full & filtered. pH of water feed: 6.8. All good.'); return; }
-  if (ci.type === 'mixer') {
-    if (state.cash < 25) { toast('Mixing costs $25 (nutrient salts + pH buffer).', 'bad'); return sfx.error(); }
-    spend(25); state.nutrient += 2;
-    sfx.dose(); toast('🧪 Mixed a fresh nutrient batch: <b>+2 units</b>.');
-    updateHUD(); return;
-  }
-  if (ci.type === 'computer') return openModal('contracts');
-  if (ci.type === 'stall') return openModal('sell');
-}
-function rackCare(action) {
-  const r = currentInteract && currentInteract.type === 'rack' ? currentInteract.rack : null;
-  if (!r) return;
-  const d = r.data;
-  if (action === 'water') {
-    if (d.water >= 99.5) return;
-    d.water = 100; sfx.water();
-  } else if (action === 'dose') {
-    if (state.nutrient <= 0) { toast('No nutrient units — mix at the station or buy in the shop (B).', 'warn'); return sfx.error(); }
-    if (!d.crop) { toast('Nothing planted yet.', 'warn'); return; }
-    state.nutrient--; d.nutr = Math.min(100, d.nutr + 45);
-    sfx.dose();
-  } else if (action === 'ph') {
-    if (state.cash < 4) { toast('pH buffer costs $4.', 'bad'); return sfx.error(); }
-    spend(4); d.ph = 6.5; sfx.click(); toast('⚗️ pH balanced to 6.5.');
-    updateHUD();
-  } else if (action === 'spray') {
-    if (state.pesticide <= 0) { toast('No pesticide — buy some in the shop (B).', 'warn'); return sfx.error(); }
-    if (!d.pests) { toast('No pests here. 🌿'); return; }
-    state.pesticide--; d.pests = false; updateRackFlags(r);
-    sfx.spray(); toast('🧴 Aphids eliminated.');
-    updateHUD();
-  }
-  updateRackPanel();
+function switchScenario(id) {
+  if (!id || id === project.activeId) return;
+  if (placing) exitPlacing();
+  const target = project.scenarios.find((s) => s.id === id);
+  if (!target) return;
+  project.activeId = target.id;
+  scaleUnits = 1;
+  closeSheet();
+  loadScenarioRuntime(target);
+  saveProject(false);
+  toast(`🧪 Sistema abierto: <b>${escapeHtml(target.name)}</b>`);
 }
 
-/* ═══════════ INPUT ═══════════ */
-function bindInput() {
-  document.addEventListener('keydown', (e) => {
-    const k = e.key.toLowerCase();
-    keys[k] = true;
-    if (k === 'escape') { if (modal) closeModal(); else togglePause(); return; }
-    if (k === 'm') { setMuted(!isMuted()); toast(isMuted() ? '🔇 Muted' : '🔊 Sound on'); return; }
-    if (screen !== 'playing') return;
-    if (k === 'b') { modal ? closeModal() : (sfx.click(), openModal('shop')); return; }
-    if (modal) return;
-    if (k === 'e') doInteract();
-    else if (k === 'f') rackCare('water');
-    else if (k === 'c') rackCare('dose');
-    else if (k === 'v') rackCare('ph');
-    else if (k === 'x') rackCare('spray');
-    else if (['1','2','3','4','5'].includes(k)) { state.selectedSeed = CROP_IDS[+k - 1]; sfx.blip(); updateHUD(); }
-  });
-  document.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
-
-  document.addEventListener('mousemove', (e) => {
-    if (document.pointerLockElement !== renderer.domElement) return;
-    yaw -= e.movementX * 0.00235;
-    pitch -= e.movementY * 0.0021;
-    pitch = Math.max(-1.35, Math.min(1.35, pitch));
-  });
-  renderer.domElement.addEventListener('click', () => {
-    if (screen === 'playing' && !modal && document.pointerLockElement !== renderer.domElement) lockPointer();
-  });
-  document.addEventListener('pointerlockchange', () => {
-    if (document.pointerLockElement !== renderer.domElement && screen === 'playing' && !modal) {
-      screen = 'paused';
-      $('pause-screen').classList.remove('hidden');
-    }
-  });
+function addScenario() {
+  const n = project.scenarios.length + 1;
+  const scenario = newScenario(`Sistema ${n}`);
+  project.scenarios.push(scenario);
+  project.activeId = scenario.id;
+  scaleUnits = 1;
+  closeSheet();
+  loadScenarioRuntime(scenario);
+  saveProject(false);
+  openSheet('build');
+  toast('🧪 Sistema vacío creado. Elegí un módulo para empezar.');
 }
 
-function bindUI() {
-  $('btn-new-game').addEventListener('click', () => { sfx.success(); newGame(true); });
-  $('btn-continue').addEventListener('click', () => { if (loadGame()) { sfx.success(); startPlaying(true); toast('💾 Save loaded. Welcome back!'); } });
-  $('btn-howto').addEventListener('click', () => { sfx.click(); $('howto-modal').classList.remove('hidden'); });
-  $('btn-howto-close').addEventListener('click', () => { sfx.click(); $('howto-modal').classList.add('hidden'); });
-  $('btn-resume').addEventListener('click', () => togglePause());
-  $('btn-save').addEventListener('click', () => saveGame(true));
-  $('btn-pause-howto').addEventListener('click', () => $('howto-modal').classList.remove('hidden'));
-  $('btn-quit-title').addEventListener('click', () => {
-    saveGame(false);
-    screen = 'title';
-    $('pause-screen').classList.add('hidden');
-    $('hud').classList.add('hidden');
-    $('title-screen').classList.remove('hidden');
-    $('btn-continue').style.visibility = localStorage.getItem(SAVE_KEY) ? 'visible' : 'hidden';
-  });
-  $('btn-next-day').addEventListener('click', () => nextDay());
-  $('btn-shop-close').addEventListener('click', () => closeModal());
-  $('btn-sell-close').addEventListener('click', () => closeModal());
-  $('btn-contracts-close').addEventListener('click', () => closeModal());
-  $('btn-sell-all').addEventListener('click', sellAll);
-
-  // delegated clicks for dynamic content
-  document.addEventListener('click', (e) => {
-    const t = e.target.closest('[data-buy-seed],[data-buy-seed5],[data-buy-pesticide],[data-buy-nutrient],[data-buy-upgrade],[data-sell-one],[data-accept],[data-deliver],[data-crop]');
-    if (!t) return;
-    if (t.dataset.buySeed) buySeed(t.dataset.buySeed, 1);
-    else if (t.dataset.buySeed5) buySeed(t.dataset.buySeed5, 5);
-    else if (t.dataset.buyPesticide) { if (state.cash >= 18) { spend(18); state.pesticide++; sfx.click(); renderShop(); updateHUD(); } else sfx.error(); }
-    else if (t.dataset.buyNutrient) { if (state.cash >= 25) { spend(25); state.nutrient += 2; sfx.click(); renderShop(); updateHUD(); } else sfx.error(); }
-    else if (t.dataset.buyUpgrade) buyUpgrade(t.dataset.buyUpgrade);
-    else if (t.dataset.sellOne) sellOne(t.dataset.sellOne);
-    else if (t.dataset.accept) acceptOffer(t.dataset.accept);
-    else if (t.dataset.deliver) deliverContract(t.dataset.deliver);
-    else if (t.dataset.crop) { state.selectedSeed = t.dataset.crop; sfx.blip(); updateHUD(); }
-  });
-  // hotbar built via innerHTML — delegate already handled above
+function duplicateScenario(id) {
+  const source = project.scenarios.find((s) => s.id === id) || currentScenario();
+  if (!source) return;
+  const copy = cloneScenario(source, `${source.name} (copia)`);
+  project.scenarios.push(copy);
+  project.activeId = copy.id;
+  scaleUnits = 1;
+  closeSheet();
+  loadScenarioRuntime(copy);
+  saveProject(false);
+  openSheet('systems');
+  toast('🧪 Sistema duplicado. Ahora podés modificarlo sin tocar el original.');
 }
 
-/* ═══════════ UPDATE LOOP ═══════════ */
-const TIME_SCALE = (DAY_END - DAY_START) / DAY_LEN; // game-minutes per real second
-let hudTimer = 0, panelTimer = 0;
-
-function update(dt) {
-  if (screen !== 'playing' || modal) return;
-
-  // clock
-  state.timeMin += dt * TIME_SCALE;
-  if (state.timeMin >= DAY_END) { state.timeMin = DAY_END; sleep(); return; }
-
-  // movement
-  const run = keys['shift'] ? 5.4 : 3.3;
-  const fwd = (keys['w'] ? 1 : 0) - (keys['s'] ? 1 : 0);
-  const str = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
-  if (fwd || str) {
-    const sin = Math.sin(yaw), cos = Math.cos(yaw);
-    const dx = (-sin * fwd + cos * str), dz = (-cos * fwd - sin * str);
-    const len = Math.hypot(dx, dz) || 1;
-    playerPos.x += (dx / len) * run * dt;
-    playerPos.z += (dz / len) * run * dt;
-    // collide (circle vs AABB)
-    const R = 0.34;
-    for (const c of world.colliders) {
-      const cx = Math.max(c.minX, Math.min(playerPos.x, c.maxX));
-      const cz = Math.max(c.minZ, Math.min(playerPos.z, c.maxZ));
-      const ddx = playerPos.x - cx, ddz = playerPos.z - cz;
-      const d2 = ddx * ddx + ddz * ddz;
-      if (d2 < R * R) {
-        if (d2 === 0) { playerPos.x += R; continue; }
-        const d = Math.sqrt(d2); playerPos.x += (ddx / d) * (R - d); playerPos.z += (ddz / d) * (R - d);
-      }
-    }
-    playerPos.x = Math.max(-14.6, Math.min(14.6, playerPos.x));
-    playerPos.z = Math.max(-8.6, Math.min(8.6, playerPos.z));
-  }
-  camera.position.copy(playerPos);
-  camera.rotation.set(pitch, yaw, 0);
-  // subtle head bob
-  if (fwd || str) camera.position.y = playerPos.y + Math.sin(clock.elapsedTime * 9) * 0.035;
-
-  // racks simulation
-  for (const rack of world.racks) {
-    if (!rack.unlocked) continue;
-    const d = rack.data;
-    if (!d.crop) continue;
-    // drains
-    const waterDrain = state.upgrades.autoWater ? 0.3 : 1.0;
-    d.water = Math.max(0, d.water - 1.05 * waterDrain * dt);
-    d.nutr = Math.max(0, d.nutr - 0.72 * dt);
-    // auto systems
-    if (state.upgrades.autoWater && d.water < 55) d.water = Math.min(100, d.water + 26 * dt);
-    if (state.upgrades.autoDose && d.nutr < 60) d.nutr = Math.min(60, d.nutr + 7 * dt);
-    // pH random walk + mild pull to alkaline
-    d.ph += (Math.random() - 0.48) * 0.055 * dt * 2;
-    d.ph = Math.max(5.3, Math.min(7.7, d.ph));
-    const phOK = d.ph >= 5.9 && d.ph <= 7.0;
-    // health
-    let stressed = false;
-    if (d.water <= 0) { d.health -= 2.5 * dt; stressed = true; }
-    if (d.nutr <= 0) { d.health -= 1.5 * dt; stressed = true; }
-    if (!phOK) d.health -= 1.1 * dt;
-    if (d.pests) { d.health -= 2.1 * dt; stressed = true; }
-    if (!stressed && phOK) d.health = Math.min(100, d.health + 1.9 * dt);
-    // growth
-    if (!d.broken && d.growth < 100) {
-      const def = CROPS[d.crop];
-      const rate = (100 / def.growTime) * ledBonus() * Math.max(0.3, d.health / 100) * (phOK ? 1 : 0.4);
-      d.growth = Math.min(100, d.growth + rate * dt);
-      if (d.growth >= 100 && !d.readyNotified) {
-        d.readyNotified = true;
-        sfx.blip();
-        toast(`✅ <b>Rack ${rack.index + 1}</b>: ${CROPS[d.crop].name} is ready to harvest!`);
-      }
-    }
-    // death
-    if (d.health <= 0) {
-      toast(`💀 Your ${CROPS[d.crop].name} on Rack ${rack.index + 1} died from neglect!`, 'bad');
-      d.crop = null; d.growth = 0; d.health = 100; d.pests = false; d.readyNotified = false;
-      sfx.error();
-      refreshRackVisual(rack, true);
-      continue;
-    }
-    refreshRackVisual(rack);
-  }
-
-  // daylight
-  world.updateDaylight((state.timeMin - DAY_START) / (DAY_END - DAY_START));
-
-  // interact raycast
-  currentInteract = findInteract();
-  updatePrompt();
-
-  hudTimer += dt;
-  if (hudTimer > 0.33) { hudTimer = 0; updateHUD(); }
-  panelTimer += dt;
-  if (panelTimer > 0.25) { panelTimer = 0; updateRackPanel(); }
-}
-
-function animate() {
-  requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
-
-  if (screen === 'title') {
-    // slow interior orbit establishing shot behind the title
-    const t = clock.elapsedTime * 0.14;
-    camera.position.set(Math.sin(t) * 5.1, 2.05 + Math.sin(t * 0.6) * 0.25, Math.cos(t) * 5.1);
-    camera.lookAt(Math.sin(t + 1.2) * 2, 1.1, Math.cos(t + 1.2) * 2);
-    world.updateDaylight(0.55);
-    renderer.render(scene, camera);
+function deleteScenario(id) {
+  if (project.scenarios.length <= 1) {
+    toast('Necesitás al menos un sistema', 'warn');
     return;
   }
-  update(dt);
-  // monitor flicker
-  if (world.screenMat) world.screenMat.emissiveIntensity = 1.0 + Math.sin(clock.elapsedTime * 7.3) * 0.12 + Math.random() * 0.05;
+  const index = project.scenarios.findIndex((s) => s.id === id);
+  if (index < 0) return;
+  const wasActive = project.activeId === id;
+  project.scenarios.splice(index, 1);
+  if (wasActive) {
+    project.activeId = project.scenarios[Math.max(0, index - 1)].id;
+    loadScenarioRuntime(currentScenario());
+  }
+  deleteScenarioArmed = null;
+  saveProject(false);
+  renderSheet();
+  toast('🗑 Sistema eliminado');
+}
+
+/* ══════════ MÓDULOS ══════════ */
+function footprint(type, rot) {
+  const def = MODULES[type];
+  return rot % 2 === 0 ? { w: def.w, h: def.h } : { w: def.h, h: def.w };
+}
+
+function areaFree(col, row, w, h, ignoreId = null) {
+  if (col < 0 || row < 0 || col + w > COLS || row + h > ROWS) return false;
+  for (const m of modules) {
+    if (m.rec.id === ignoreId) continue;
+    const f = m.fp;
+    if (col < m.rec.col + f.w && col + w > m.rec.col
+      && row < m.rec.row + f.h && row + h > m.rec.row) return false;
+  }
+  return true;
+}
+
+function applyPlants(m) {
+  const def = MODULES[m.rec.type];
+  if (!def || def.kind !== 'nft' || !m.setPlants) return;
+  const data = m.rec.data;
+  const crop = CROPS[data.crop] || CROPS.lettuce;
+  m.setPlants(crop, data.plants || def.plants);
+}
+
+function placeRuntime(rec) {
+  const built = createModuleModel(rec.type);
+  if (!built) return null;
+  const def = MODULES[rec.type];
+  const fp = footprint(rec.type, rec.rot);
+  const center = moduleCenter(rec.col, rec.row, fp.w, fp.h);
+  const group = built.group;
+  group.position.set(center.x, 0, center.z);
+  group.rotation.y = rec.rot * Math.PI / 2;
+  group.traverse((o) => { o.userData.moduleId = rec.id; });
+  scene.add(group);
+  const m = { rec, fp, group, setPlants: built.setPlants };
+  modules.push(m);
+  if (def.kind === 'nft') {
+    rec.data = normalizeModuleData(rec, currentScenario().params);
+    applyPlants(m);
+  }
+  return m;
+}
+
+function disposeGroup(group) {
+  group.traverse((o) => {
+    if (!o.isMesh) return;
+    o.geometry?.dispose();
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const mat of mats) {
+      if (!mat) continue;
+      mat.map?.dispose?.();
+      mat.dispose();
+    }
+  });
+}
+
+function removeModule(id) {
+  const m = modules.find((x) => x.rec.id === id);
+  if (!m) return;
+  const scenario = currentScenario();
+  scenario.modules = scenario.modules.filter((r) => r.id !== id);
+  scene.remove(m.group);
+  disposeGroup(m.group);
+  modules = modules.filter((x) => x.rec.id !== id);
+  if (selectedId === id) {
+    selectedId = null;
+    selHighlight.visible = false;
+  }
+  deleteArmed = null;
+  closeSheet();
+  saveProject(false);
+  updateHUD();
+  sfx.cash();
+  toast(`🗑 ${MODULES[m.rec.type].name} eliminado del sistema`);
+}
+
+function rotateSelected() {
+  const m = modules.find((x) => x.rec.id === selectedId);
+  if (!m) return;
+  const def = MODULES[m.rec.type];
+  if (def.w === def.h) return;
+  const newRot = m.rec.rot ? 0 : 1;
+  const fp = footprint(m.rec.type, newRot);
+  if (!areaFree(m.rec.col, m.rec.row, fp.w, fp.h, m.rec.id)) {
+    toast('No hay espacio para rotar: mové otros módulos primero', 'bad');
+    sfx.error();
+    return;
+  }
+  m.rec.rot = newRot;
+  m.fp = fp;
+  const center = moduleCenter(m.rec.col, m.rec.row, fp.w, fp.h);
+  m.group.position.set(center.x, 0, center.z);
+  m.group.rotation.y = newRot * Math.PI / 2;
+  selectModule(m);
+  saveProject(false);
+  renderSheet();
+  updateHUD();
+  sfx.click();
+}
+
+/* ══════════ COLOCACIÓN ══════════ */
+function startPlacing(type) {
+  const def = MODULES[type];
+  if (!def) return;
+  exitPlacing();
+  closeSheet();
+  const built = createModuleModel(type);
+  if (!built) return;
+  const ghost = built.group;
+  const originalMats = new Set();
+  ghost.visible = false;
+  ghost.traverse((o) => {
+    if (o.isMesh && o.material) {
+      originalMats.add(o.material);
+      o.material = ghostMat;
+      o.castShadow = false;
+      o.receiveShadow = false;
+    }
+    if (o.isPointLight) o.visible = false;
+  });
+  scene.add(ghost);
+  placing = {
+    type, rot: 0, ghost, col: null, row: null, valid: false,
+    originalMats, justPlaced: false,
+  };
+  selectedId = null;
+  selHighlight.visible = false;
+  ghostHighlight.visible = false;
+  world.grid.visible = true;
+  $('placement-bar').classList.remove('hidden');
+  $('pb-icon').textContent = def.icon;
+  $('pb-name').textContent = def.name;
+  $('pb-confirm').disabled = true;
+  updatePlacementBar();
+  syncChrome();
+  sfx.click();
+}
+
+function moduleCost(type) {
+  const def = MODULES[type];
+  const scenario = currentScenario();
+  return moduleMaterialCost(
+    type,
+    def.kind === 'nft' ? { plants: def.plants } : {},
+    scenario.params.materialFactor || 1,
+  );
+}
+
+function updatePlacementBar() {
+  if (!placing) return;
+  const def = MODULES[placing.type];
+  const cost = moduleCost(placing.type);
+  const confirm = $('pb-confirm');
+  confirm.disabled = !placing.valid;
+  if (placing.justPlaced) {
+    $('pb-hint').textContent = '✓ Colocado · tocá otra celda o cancelá';
+  } else if (placing.col === null) {
+    $('pb-hint').textContent = `${fmtMoney(cost)} · tocá una celda del piso`;
+  } else if (!placing.valid) {
+    $('pb-hint').textContent = '❌ No entra o está ocupado';
+  } else {
+    $('pb-hint').textContent = `✓ ${fmtMoney(cost)} · confirmá con COLOCAR`;
+  }
+}
+
+function setGhostCell(col, row) {
+  if (!placing) return;
+  const fp = footprint(placing.type, placing.rot);
+  placing.col = col;
+  placing.row = row;
+  placing.justPlaced = false;
+  placing.valid = areaFree(col, row, fp.w, fp.h);
+  const center = moduleCenter(col, row, fp.w, fp.h);
+  placing.ghost.position.set(center.x, 0, center.z);
+  placing.ghost.rotation.y = placing.rot * Math.PI / 2;
+  placing.ghost.visible = true;
+  ghostHighlight.position.set(center.x, 0, center.z);
+  ghostHighlight.scale.set(fp.w * TILE - 0.06, 1, fp.h * TILE - 0.06);
+  ghostHighlight.visible = true;
+  const color = placing.valid ? 0x4ade80 : 0xf87171;
+  ghostHighlight.userData.plane.material.color.setHex(color);
+  ghostHighlight.userData.border.material.color.setHex(color);
+  ghostMat.color.setHex(color);
+  updatePlacementBar();
+  sfx.blip();
+}
+
+function rotateGhost() {
+  if (!placing) return;
+  placing.rot = placing.rot ? 0 : 1;
+  if (placing.col !== null) setGhostCell(placing.col, placing.row);
+  else sfx.click();
+}
+
+function confirmPlacement() {
+  if (!placing || !placing.valid) return;
+  const scenario = currentScenario();
+  const def = MODULES[placing.type];
+  const data = def.kind === 'nft'
+    ? { crop: scenario.params.defaultCrop || 'lettuce', plants: def.plants }
+    : {};
+  const rec = {
+    id: project.nextModuleId++,
+    type: placing.type,
+    col: placing.col,
+    row: placing.row,
+    rot: placing.rot,
+    data,
+  };
+  scenario.modules.push(rec);
+  const m = placeRuntime(rec);
+  if (!m) return;
+  ghostMat.color.setHex(0x4ade80);
+  placing.ghost.visible = false;
+  ghostHighlight.visible = false;
+  placing.col = null;
+  placing.row = null;
+  placing.valid = false;
+  placing.justPlaced = true;
+  updatePlacementBar();
+  saveProject(false);
+  updateHUD();
+  sfx.build();
+  toast(`${def.icon} <b>${def.name}</b> agregado · ${fmtMoney(moduleCost(placing.type))}`);
+
+  if (def.kind === 'nft') {
+    const summary = currentSummary();
+    if (!summary.reservoirs && !hintReservoirShown) {
+      hintReservoirShown = true;
+      setTimeout(() => toast('💡 Falta el kit de reservorio: bomba, tanque y solución nutritiva.', 'warn'), 900);
+    }
+  }
+}
+
+function exitPlacing() {
+  if (!placing) return;
+  scene.remove(placing.ghost);
+  placing.ghost.traverse((o) => { if (o.isMesh) o.geometry?.dispose(); });
+  for (const mat of placing.originalMats) {
+    mat?.map?.dispose?.();
+    mat?.dispose?.();
+  }
+  placing = null;
+  ghostHighlight.visible = false;
+  world.grid.visible = false;
+  $('placement-bar').classList.add('hidden');
+  ghostMat.color.setHex(0x4ade80);
+  syncChrome();
+}
+
+/* ══════════ SELECCIÓN ══════════ */
+function selectModule(m) {
+  selectedId = m.rec.id;
+  const fp = m.fp;
+  const center = moduleCenter(m.rec.col, m.rec.row, fp.w, fp.h);
+  selHighlight.position.set(center.x, 0, center.z);
+  selHighlight.scale.set(fp.w * TILE - 0.08, 1, fp.h * TILE - 0.08);
+  selHighlight.visible = true;
+  sfx.blip();
+}
+
+function openModuleSheet(m) {
+  selectModule(m);
+  activeSheet = 'module';
+  deleteArmed = null;
+  resetArmed = false;
+  renderSheet();
+  showSheet();
+}
+
+function selectedModule() {
+  return modules.find((m) => m.rec.id === selectedId) || null;
+}
+
+/* ══════════ TOUCH / CÁMARA ══════════ */
+const pointers = new Map();
+let drag = null;
+let pinch = null;
+
+function bindTouch() {
+  const el = renderer.domElement;
+  el.addEventListener('pointerdown', (e) => {
+    if (screen !== 'playing') return;
+    unlockAudio();
+    el.setPointerCapture?.(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 1) {
+      drag = {
+        startX: e.clientX, startY: e.clientY,
+        lastX: e.clientX, lastY: e.clientY,
+        t: performance.now(), moved: false,
+      };
+      pinch = null;
+    } else if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), zoom: camZoom };
+      drag = null;
+    }
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    const prev = pointers.get(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 1 && drag) {
+      const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+      if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 7) drag.moved = true;
+      if (drag.moved) panBy(dx, dy);
+    } else if (pointers.size === 2 && pinch) {
+      const [a, b] = [...pointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      camZoom = clamp(pinch.zoom * (d / pinch.dist), MIN_ZOOM, MAX_ZOOM);
+      updateCamera();
+    }
+  });
+  const endPointer = (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    const wasTap = pointers.size === 1 && drag && !drag.moved
+      && (performance.now() - drag.t) < 600;
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 0) {
+      if (wasTap) handleTap(e.clientX, e.clientY);
+      drag = null;
+    } else if (pointers.size === 1) {
+      const p = [...pointers.values()][0];
+      drag = { startX: p.x, startY: p.y, lastX: p.x, lastY: p.y, t: performance.now(), moved: true };
+    }
+  };
+  el.addEventListener('pointerup', endPointer);
+  el.addEventListener('pointercancel', endPointer);
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
+  el.addEventListener('wheel', (e) => {
+    if (screen !== 'playing') return;
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? 1.08 : 0.93);
+  }, { passive: false });
+}
+
+function pickNdc(clientX, clientY, out) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  out.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  out.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  return out;
+}
+
+function handleTap(clientX, clientY) {
+  pickNdc(clientX, clientY, pointerNdc);
+  raycaster.setFromCamera(pointerNdc, camera);
+  if (placing) {
+    const hit = raycaster.ray.intersectPlane(floorPlane, tempVec);
+    if (hit) {
+      const tile = worldToTile(tempVec.x, tempVec.z);
+      setGhostCell(tile.col, tile.row);
+    }
+    return;
+  }
+  const hits = raycaster.intersectObjects(modules.map((m) => m.group), true);
+  if (hits.length) {
+    let obj = hits[0].object;
+    while (obj && obj.userData.moduleId === undefined) obj = obj.parent;
+    if (obj) {
+      const m = modules.find((x) => x.rec.id === obj.userData.moduleId);
+      if (m) {
+        openModuleSheet(m);
+        return;
+      }
+    }
+  }
+  selectedId = null;
+  selHighlight.visible = false;
+  if (activeSheet) closeSheet();
+}
+
+/* ══════════ HOJAS ══════════ */
+function showSheet() {
+  $('sheet').classList.remove('hidden');
+  $('sheet-scrim').classList.remove('hidden');
+  $('sheet-body').scrollTop = 0;
+  document.querySelectorAll('#bottom-nav button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.nav === activeSheet);
+  });
+  syncChrome();
+}
+
+function closeSheet() {
+  const wasModule = activeSheet === 'module';
+  activeSheet = null;
+  deleteArmed = null;
+  resetArmed = false;
+  $('sheet').classList.add('hidden');
+  $('sheet-scrim').classList.add('hidden');
+  document.querySelectorAll('#bottom-nav button').forEach((b) => b.classList.remove('active'));
+  if (wasModule) {
+    selectedId = null;
+    selHighlight.visible = false;
+  }
+  syncChrome();
+}
+
+function openSheet(name) {
+  if (placing) exitPlacing();
+  if (activeSheet === name) { closeSheet(); return; }
+  activeSheet = name;
+  selectedId = null;
+  selHighlight.visible = false;
+  deleteArmed = null;
+  resetArmed = false;
+  renderSheet();
+  showSheet();
+  sfx.click();
+}
+
+function renderSheet() {
+  if (!activeSheet) return;
+  const scenario = currentScenario();
+  if (!scenario) { closeSheet(); return; }
+
+  if (activeSheet === 'module') {
+    const m = selectedModule();
+    if (!m) { closeSheet(); return; }
+    $('sheet-title').textContent = `${MODULES[m.rec.type].icon} ${MODULES[m.rec.type].name}`;
+    $('sheet-body').innerHTML = moduleSheetHTML(m, scenario, deleteArmed);
+    return;
+  }
+
+  $('sheet-title').textContent = SHEET_TITLES[activeSheet] || '';
+  const summary = currentSummary();
+  const records = currentRecords();
+
+  if (activeSheet === 'build') {
+    const counts = scenarioCounts(scenario, project.activeId, modules);
+    $('sheet-body').innerHTML = buildSheetHTML({ scenario, summary, counts });
+  } else if (activeSheet === 'materials') {
+    const bom = consolidatedBOM(scenario.params, records);
+    $('sheet-body').innerHTML = materialsSheetHTML({ scenario, summary, bom });
+  } else if (activeSheet === 'production') {
+    const crop = scenario.params.defaultCrop || 'lettuce';
+    const increments = [
+      moduleIncrement(summary, scenario.params, records, 'nft12', crop),
+      moduleIncrement(summary, scenario.params, records, 'nft6', crop),
+    ];
+    $('sheet-body').innerHTML = productionSheetHTML({ scenario, summary, increments });
+  } else if (activeSheet === 'systems') {
+    const scenarios = project.scenarios.map((s) => ({
+      scenario: s,
+      summary: summaryFor(s, project.activeId, modules),
+      counts: scenarioCounts(s, project.activeId, modules),
+      active: s.id === project.activeId,
+    }));
+    const expansion = expansionFor(
+      summary, scenario.params, records, expandType, scaleUnits, scenario.params.defaultCrop,
+    );
+    $('sheet-body').innerHTML = systemsSheetHTML({
+      scenarios, activeId: project.activeId, scaleUnits, expandType, expansion, deleteScenarioArmed,
+    });
+  } else if (activeSheet === 'economy') {
+    $('sheet-body').innerHTML = economySheetHTML({ scenario, summary });
+  } else if (activeSheet === 'menu') {
+    $('sheet-body').innerHTML = menuSheetHTML({ scenario, resetArmed });
+  }
+}
+
+/* ══════════ ACCIONES DE LAS HOJAS ══════════ */
+const PARAM_SPECS = {
+  materialFactor: { step: 0.05, min: 0.5, max: 2.5 },
+  discardPct: { step: 1, min: 0, max: 40 },
+  laborHoursWeek: { step: 1, min: 0, max: 80 },
+  laborRate: { step: 1, min: 0, max: 80 },
+  electricityPrice: { step: 0.01, min: 0, max: 1 },
+  waterPrice: { step: 0.1, min: 0, max: 20 },
+  waterLitersPlantDay: { step: 0.1, min: 0, max: 20 },
+  nutrientCostPlantMonth: { step: 0.005, min: 0, max: 1 },
+  contingencyPct: { step: 1, min: 0, max: 40 },
+  depreciationYears: { step: 1, min: 1, max: 20 },
+};
+const CROP_SPECS = {
+  priceKg: { step: 0.1, min: 0.1, max: 30 },
+  yieldG: { step: 10, min: 30, max: 1000 },
+  cycleDays: { step: 1, min: 7, max: 180 },
+};
+
+function adjustParam(key, dir) {
+  const spec = PARAM_SPECS[key];
+  if (!spec) return;
+  const params = currentScenario().params;
+  const value = clamp(+(Number(params[key]) + spec.step * dir).toFixed(4), spec.min, spec.max);
+  params[key] = value;
+  saveProject(false);
+  updateHUD();
+  renderSheet();
+  sfx.click();
+}
+
+function adjustCropParam(cropId, key, dir) {
+  const spec = CROP_SPECS[key];
+  const params = currentScenario().params;
+  if (!spec || !params.crops[cropId]) return;
+  const crop = params.crops[cropId];
+  const value = clamp(+(Number(crop[key]) + spec.step * dir).toFixed(4), spec.min, spec.max);
+  crop[key] = value;
+  saveProject(false);
+  updateHUD();
+  renderSheet();
+  sfx.click();
+}
+
+function applyCropToAll(cropId) {
+  const scenario = currentScenario();
+  if (!CROPS[cropId]) return;
+  scenario.params.defaultCrop = cropId;
+  let count = 0;
+  for (const m of modules) {
+    if (MODULES[m.rec.type]?.kind !== 'nft') continue;
+    m.rec.data.crop = cropId;
+    applyPlants(m);
+    count++;
+  }
+  saveProject(false);
+  updateHUD();
+  renderSheet();
+  sfx.click();
+  toast(`🌿 ${CROPS[cropId].name} aplicado a ${count} ${count === 1 ? 'caño' : 'caños'}`);
+}
+
+function changeModuleCrop(cropId) {
+  const m = selectedModule();
+  if (!m || MODULES[m.rec.type]?.kind !== 'nft' || !CROPS[cropId]) return;
+  m.rec.data.crop = cropId;
+  currentScenario().params.defaultCrop = cropId;
+  applyPlants(m);
+  saveProject(false);
+  updateHUD();
+  renderSheet();
+  sfx.plant();
+}
+
+function changeModulePlants(dir) {
+  const m = selectedModule();
+  if (!m) return;
+  const def = MODULES[m.rec.type];
+  if (!def || def.kind !== 'nft') return;
+  const current = m.rec.data.plants;
+  const step = def.plantStep || 5;
+  const value = clamp(
+    Math.round(current + dir * step),
+    def.plantMin || 1,
+    def.plantMax || def.plants,
+  );
+  if (value === current) return;
+  m.rec.data.plants = value;
+  applyPlants(m);
+  saveProject(false);
+  updateHUD();
+  renderSheet();
+  sfx.click();
+}
+
+function handleSheetAction(event) {
+  const button = event.target.closest('[data-action]');
+  if (!button) return;
+  const d = button.dataset;
+  const scenario = currentScenario();
+
+  switch (d.action) {
+    case 'start-build':
+      startPlacing(d.type);
+      break;
+    case 'toggle-greenhouse':
+      scenario.params.includeGreenhouse = !scenario.params.includeGreenhouse;
+      saveProject(false);
+      updateHUD();
+      renderSheet();
+      sfx.click();
+      break;
+    case 'param':
+      adjustParam(d.param, Number(d.dir));
+      break;
+    case 'crop-param':
+      adjustCropParam(d.crop, d.key, Number(d.dir));
+      break;
+    case 'crop-all':
+      applyCropToAll(d.crop);
+      break;
+    case 'module-crop':
+      changeModuleCrop(d.crop);
+      break;
+    case 'module-crop-all':
+    case 'apply-crop-all': {
+      const m = selectedModule();
+      if (m) applyCropToAll(m.rec.data.crop);
+      break;
+    }
+    case 'module-plants':
+      changeModulePlants(Number(d.dir));
+      break;
+    case 'rotate-module':
+      rotateSelected();
+      break;
+    case 'delete-module':
+      if (deleteArmed !== selectedId) {
+        deleteArmed = selectedId;
+        renderSheet();
+        toast('Tocá otra vez para confirmar la eliminación', 'warn');
+        sfx.error();
+      } else {
+        removeModule(selectedId);
+      }
+      break;
+    case 'switch-scenario':
+      if (d.id) switchScenario(d.id);
+      break;
+    case 'duplicate-scenario':
+      duplicateScenario(d.id);
+      break;
+    case 'delete-scenario':
+      if (project.scenarios.length <= 1) {
+        toast('Necesitás al menos un sistema', 'warn');
+      } else if (deleteScenarioArmed !== d.id) {
+        deleteScenarioArmed = d.id;
+        renderSheet();
+        toast('Tocá otra vez para eliminar este sistema', 'warn');
+      } else {
+        deleteScenario(d.id);
+      }
+      break;
+    case 'new-scenario':
+      addScenario();
+      break;
+    case 'scale':
+      scaleUnits = clamp(scaleUnits + Number(d.dir), 1, 50);
+      renderSheet();
+      sfx.click();
+      break;
+    case 'expand-type':
+      if (d.type === 'nft12' || d.type === 'nft6') {
+        expandType = d.type;
+        renderSheet();
+        sfx.click();
+      }
+      break;
+    case 'rename-scenario': {
+      const name = window.prompt('Nombre del sistema:', scenario.name);
+      if (name && name.trim()) {
+        scenario.name = name.trim().slice(0, 40);
+        saveProject(false);
+        updateHUD();
+        renderSheet();
+        toast('✏️ Sistema renombrado');
+      }
+      break;
+    }
+    case 'save-now':
+      saveProject(true);
+      break;
+    case 'export-json':
+      exportProjectJSON();
+      break;
+    case 'export-csv':
+      exportMaterialsCSV();
+      break;
+    case 'open-help':
+      openHelp();
+      break;
+    case 'go-systems':
+      openSheet('systems');
+      break;
+    case 'reset-project':
+      if (!resetArmed) {
+        resetArmed = true;
+        renderSheet();
+        toast('⚠️ Esto borra todos los sistemas guardados. Tocá otra vez.', 'warn');
+        sfx.error();
+      } else {
+        resetAll();
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+/* ══════════ EXPORTAR ══════════ */
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function projectSlug() {
+  const name = currentScenario()?.name || 'proyecto';
+  return name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'proyecto';
+}
+
+function exportProjectJSON() {
+  downloadFile(`hidroplan-${projectSlug()}.json`, JSON.stringify(JSON.parse(serializeProject()), null, 2), 'application/json');
+  toast('⬇️ Proyecto exportado como .json');
+  sfx.cash();
+}
+
+function csvCell(value) {
+  const text = String(value ?? '').replace(/;/g, ',').replace(/\n/g, ' ');
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function exportMaterialsCSV() {
+  const scenario = currentScenario();
+  const bom = consolidatedBOM(scenario.params, currentRecords());
+  const lines = [
+    ['Categoría', 'Material', 'Especificación', 'Cantidad', 'Unidad', 'Costo unitario USD', 'Subtotal USD'],
+    ...bom.rows.map((r) => [r.cat, r.name, r.spec || '', r.qty, r.unit, r.unitCost.toFixed(2), r.subtotal.toFixed(2)]),
+    ['', '', '', '', '', 'TOTAL', bom.total.toFixed(2)],
+    ['', '', '', '', '', 'Sistema', scenario.name],
+  ];
+  const csv = '\uFEFF' + lines.map((row) => row.map(csvCell).join(';')).join('\r\n');
+  downloadFile(`materiales-${projectSlug()}.csv`, csv, 'text/csv;charset=utf-8');
+  toast('⬇️ Lista de materiales exportada');
+  sfx.cash();
+}
+
+/* ══════════ PANTALLA DE INICIO ══════════ */
+function clearTitleShowcase() {
+  for (const group of titleModels) {
+    scene.remove(group);
+    disposeGroup(group);
+  }
+  titleModels = [];
+}
+
+function buildTitleShowcase() {
+  clearTitleShowcase();
+  const add = (type, col, row, rot = 0, crop = 'lettuce') => {
+    const def = MODULES[type];
+    const built = createModuleModel(type);
+    if (!built) return;
+    const fp = rot % 2 ? { w: def.h, h: def.w } : { w: def.w, h: def.h };
+    const center = moduleCenter(col, row, fp.w, fp.h);
+    built.group.position.set(center.x, 0, center.z);
+    built.group.rotation.y = rot * Math.PI / 2;
+    if (def.kind === 'nft' && built.setPlants) {
+      built.setPlants(CROPS[crop] || CROPS.lettuce, def.plants);
+    }
+    scene.add(built.group);
+    titleModels.push(built.group);
+  };
+  const crops = ['lettuce', 'basil', 'arugula', 'kale'];
+  let i = 0;
+  for (const row of [2, 5, 8, 11]) {
+    add('nft12', 0, row, 0, crops[i++ % crops.length]);
+    add('nft12', 12, row, 0, crops[i++ % crops.length]);
+  }
+  add('reservoir', 18, 13);
+  add('nursery', 1, 14);
+  add('bench', 4, 14);
+  add('crate', 21, 13);
+  add('planter', 23, 13);
+  add('sign', 0, 0);
+}
+
+function renderTitle() {
+  screen = 'title';
+  document.body.classList.add('at-title');
+  $('title-screen').classList.remove('hidden');
+  $('topbar').classList.add('hidden');
+  $('bottom-nav').classList.add('hidden');
+  $('zoom-controls').classList.add('hidden');
+  $('empty-hint').classList.add('hidden');
+  $('placement-bar').classList.add('hidden');
+  activeSheet = null;
+  selectedId = null;
+  selHighlight.visible = false;
+  camTarget.set(0, 0, 2);
+  camZoom = titleZoom();
+  updateCamera();
+  updateContinueButton();
+}
+
+function showGame(openBuild = false) {
+  screen = 'playing';
+  clearTitleShowcase();
+  document.body.classList.remove('at-title');
+  $('title-screen').classList.add('hidden');
+  $('topbar').classList.remove('hidden');
+  $('bottom-nav').classList.remove('hidden');
+  selectedId = null;
+  selHighlight.visible = false;
+  camTarget.set(0, 0, 0);
+  camZoom = gameZoom();
+  updateCamera();
+  updateHUD();
+  if (openBuild) openSheet('build');
+  else syncChrome();
+}
+
+function freshProject() {
+  const scenario = newScenario('Sistema 1');
+  return { activeId: scenario.id, scenarios: [scenario], nextModuleId: 1 };
+}
+
+function startNewProject(skipConfirm = false) {
+  if (!skipConfirm && !newArmed && localStorage.getItem(SAVE_KEY)) {
+    newArmed = true;
+    toast('⚠️ Ya hay un proyecto guardado. Tocá <b>NUEVO PROYECTO</b> otra vez para empezar de cero.', 'warn');
+    setTimeout(() => { newArmed = false; }, 4200);
+    return;
+  }
+  newArmed = false;
+  clearTitleShowcase();
+  project = freshProject();
+  hintReservoirShown = false;
+  scaleUnits = 1;
+  loadScenarioRuntime(currentScenario());
+  showGame(true);
+  saveProject(false);
+  sfx.success();
+  toast('🧪 Proyecto nuevo: presupuestá los módulos y mirá los números.');
+}
+
+function continueProject() {
+  if (!loadProject()) {
+    toast('No hay un proyecto guardado en este teléfono', 'warn');
+    updateContinueButton();
+    return;
+  }
+  hintReservoirShown = false;
+  scaleUnits = 1;
+  showGame(false);
+  sfx.success();
+  toast('💾 Proyecto cargado');
+}
+
+function resetAll() {
+  try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* sin almacenamiento */ }
+  project = freshProject();
+  hintReservoirShown = false;
+  scaleUnits = 1;
+  deleteScenarioArmed = null;
+  loadScenarioRuntime(currentScenario());
+  saveProject(false);
+  closeSheet();
+  updateContinueButton();
+  openSheet('build');
+  toast('🧪 Todos los sistemas fueron borrados');
+  sfx.success();
+}
+
+/* ══════════ HUD / CHROME ══════════ */
+function updateHUD() {
+  if (!project.scenarios.length) return;
+  const scenario = currentScenario();
+  if (!scenario) return;
+  const summary = currentSummary();
+  $('capex').textContent = fmtMoney(summary.capex);
+  const pipeText = summary.pipes === 1 ? '1 caño' : `${summary.pipes} caños`;
+  const plantText = summary.plants === 1 ? '1 planta' : `${summary.plants} plantas`;
+  $('project-line').textContent = `${scenario.name} · ${pipeText} · ${plantText}`;
+  syncChrome();
+}
+
+function syncChrome() {
+  const playing = screen === 'playing';
+  const sheetOpen = !!activeSheet;
+  $('empty-hint').classList.toggle('hidden', !(playing && modules.length === 0 && !placing && !sheetOpen));
+  $('zoom-controls').classList.toggle('hidden', !(playing && !placing && !sheetOpen));
+  document.body.classList.toggle('is-placing', !!placing);
+}
+
+/* ══════════ AYUDA / PANTALLA COMPLETA ══════════ */
+function openHelp() {
+  closeSheet();
+  $('help-modal').classList.remove('hidden');
+  sfx.click();
+}
+function closeHelp() {
+  $('help-modal').classList.add('hidden');
+}
+
+async function toggleFullscreen() {
+  try {
+    if (!document.fullscreenElement) await document.documentElement.requestFullscreen?.();
+    else await document.exitFullscreen?.();
+  } catch (e) { /* el navegador puede bloquearlo */ }
+}
+
+/* ══════════ BIND DE UI ══════════ */
+function bindUI() {
+  $('sheet-body').addEventListener('click', handleSheetAction);
+  $('sheet-close').addEventListener('click', () => { closeSheet(); sfx.click(); });
+  $('sheet-scrim').addEventListener('click', closeSheet);
+
+  document.querySelectorAll('#bottom-nav button').forEach((button) => {
+    button.addEventListener('click', () => {
+      unlockAudio();
+      openSheet(button.dataset.nav);
+    });
+  });
+
+  $('btn-new').addEventListener('click', () => { unlockAudio(); startNewProject(false); });
+  $('btn-continue').addEventListener('click', () => { unlockAudio(); continueProject(); });
+  $('btn-help-title').addEventListener('click', openHelp);
+  $('btn-help-close').addEventListener('click', () => { closeHelp(); sfx.click(); });
+  $('help-modal').addEventListener('click', (event) => {
+    if (event.target === $('help-modal')) closeHelp();
+  });
+
+  $('btn-menu').addEventListener('click', () => openSheet('menu'));
+  $('btn-fullscreen').addEventListener('click', toggleFullscreen);
+  $('zoom-in').addEventListener('click', () => { zoomBy(1.18); sfx.click(); });
+  $('zoom-out').addEventListener('click', () => { zoomBy(0.85); sfx.click(); });
+
+  $('pb-rotate').addEventListener('click', () => { rotateGhost(); sfx.click(); });
+  $('pb-confirm').addEventListener('click', confirmPlacement);
+  $('pb-cancel').addEventListener('click', () => { exitPlacing(); sfx.click(); });
+
+  document.addEventListener('pointerdown', unlockAudio, { once: true });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (!$('help-modal').classList.contains('hidden')) closeHelp();
+    else if (placing) exitPlacing();
+    else if (activeSheet) closeSheet();
+  });
+}
+
+/* ══════════ LOOP ══════════ */
+function animate() {
+  requestAnimationFrame(animate);
   renderer.render(scene, camera);
 }
 
-/* debug / test hook (harmless in production) */
+/* ══════════ HOOKS DE PRUEBA ══════════ */
 window.__hidro = {
-  getState: () => state,
-  world,
-  teleport(x, z, y = 0) { playerPos.set(x, 1.66, z); yaw = y; },
-  plant(i, id) { const r = world.racks[i]; Object.assign(r.data, { crop: id, growth: 3, water: 90, nutr: 70, health: 100, pests: false, broken: false, ph: 6.5 }); refreshRackVisual(r, true); },
-  grow(i, g) { const r = world.racks[i]; r.data.growth = g; refreshRackVisual(r, true); },
-  fillProduce(n) { for (const id of CROP_IDS) state.produce[id] = n; updateHUD(); },
-  addCash(n) { state.cash += n; updateHUD(); checkMilestones(); },
+  project: () => project,
+  scenario: () => currentScenario(),
+  summary: () => currentSummary(),
+  records: () => currentRecords(),
+  modules: () => modules.map((m) => ({ ...m.rec, data: { ...m.rec.data } })),
+  screen: () => screen,
+  sheet: () => activeSheet,
+  renderer: () => renderer,
+  camera: () => camera,
+  scene: () => scene,
+  world: () => world,
+  place: (type, col, row, rot = 0, data = null) => {
+    const def = MODULES[type];
+    if (!def) return null;
+    const fp = footprint(type, rot);
+    if (!areaFree(col, row, fp.w, fp.h)) return null;
+    const rec = {
+      id: project.nextModuleId++, type, col, row, rot,
+      data: data || (def.kind === 'nft'
+        ? { crop: currentScenario().params.defaultCrop || 'lettuce', plants: def.plants }
+        : {}),
+    };
+    currentScenario().modules.push(rec);
+    placeRuntime(rec);
+    saveProject(false);
+    updateHUD();
+    return { ...rec, data: { ...rec.data } };
+  },
+  remove: (id) => removeModule(id),
+  setCrop: (cropId) => applyCropToAll(cropId),
+  setParam: (key, value) => {
+    currentScenario().params[key] = value;
+    saveProject(false);
+    updateHUD();
+    if (activeSheet) renderSheet();
+  },
+  switchScenario: (id) => switchScenario(id),
+  addScenario: () => addScenario(),
+  duplicateScenario: (id) => duplicateScenario(id),
+  scale: (n) => {
+    scaleUnits = clamp(Number(n) || 1, 1, 50);
+    if (activeSheet === 'systems') renderSheet();
+  },
+  openSheet: (name) => openSheet(name),
+  closeSheet: () => closeSheet(),
+  startPlacing: (type) => startPlacing(type),
+  confirm: () => confirmPlacement(),
+  exitPlacing: () => exitPlacing(),
 };
 
-/* boot */
 init();
+
+

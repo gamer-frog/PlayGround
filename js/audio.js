@@ -8,6 +8,8 @@ function ac() {
   return ctx;
 }
 
+export function unlockAudio() { try { ac(); } catch (e) {} }
+
 export function setMuted(m) { muted = m; }
 export function isMuted() { return muted; }
 
