@@ -43,6 +43,9 @@
   const STEP_DURATION = .115;
   const NPC_AIM_DURATION = .58;
   const NPC_MELEE_ACCURACY = .78;
+  const POTION_EFFECTS = { health: 45, mana: 35 };
+  const INITIAL_POTIONS = Object.freeze({ health: 3, mana: 3 });
+  const potionInventory = { ...INITIAL_POTIONS };
   const images = new Map();
   let mapData, grhs, characters;
   let W = 800, H = 480, dpr = 1, tilePx = 32;
@@ -293,6 +296,23 @@
       if (target.hp <= 0) kill(target, player);
     }
     selectedSkill = null; refreshSkillSelection();
+    refreshHud();
+  }
+  function usePotion(type) {
+    if (!player || !(type in POTION_EFFECTS)) return;
+    if (gameOver || paused || !player.alive) return;
+    const count = potionInventory[type] ?? 0, resource = type === 'health' ? 'hp' : 'mana';
+    const max = type === 'health' ? player.maxHp : player.maxMana;
+    if (count <= 0) { toast(`No te quedan pociones ${type === 'health' ? 'rojas' : 'azules'}.`); return; }
+    if (player[resource] >= max) { toast(`Ya tenés ${type === 'health' ? 'toda la vida' : 'todo el maná'}.`); return; }
+    const restored = Math.min(POTION_EFFECTS[type], max - player[resource]);
+    player[resource] += restored; player.flash = .2;
+    potionInventory[type] = count - 1;
+    addFloatingText(player, `+${restored}`, 'heal');
+    const [px, py] = position(player);
+    spellEffects.push({ x: px, y: py, tx: px, ty: py, age: 0, duration: .65, kind: 'heal' });
+    toast(`Poción ${type === 'health' ? 'roja' : 'azul'}: recuperaste ${restored} de ${type === 'health' ? 'vida' : 'maná'}.`);
+    tone(type === 'health' ? 480 : 560, .13);
     refreshHud();
   }
   function applyClass(className) {
@@ -558,6 +578,13 @@
       button.classList.toggle('cooling', cooldown > 0);
       button.querySelector('.spell-cost').textContent = cooldown > 0 ? `${cooldown.toFixed(1)}s` : `${skill.cost} maná`;
     });
+    const healthPotion = $('healthPotion'), manaPotion = $('manaPotion');
+    if (healthPotion && manaPotion) {
+      $('healthPotionCount').textContent = potionInventory.health;
+      $('manaPotionCount').textContent = potionInventory.mana;
+      healthPotion.disabled = !player.alive || potionInventory.health <= 0 || player.hp >= player.maxHp;
+      manaPotion.disabled = !player.alive || potionInventory.mana <= 0 || player.mana >= player.maxMana;
+    }
     $('playerKills').innerHTML = `${kills} <i>/ 5</i>`; $('rosterPlayerKills').textContent = kills;
     $('score-luna').textContent = byId.luna.kills; $('score-bruno').textContent = byId.bruno.kills; $('score-mateo').textContent = byId.mateo.kills;
     $('progressText').textContent = `${kills} / 5`; $('progressBar').style.width = `${Math.min(100, kills / 5 * 100)}%`;
@@ -580,6 +607,7 @@
     for (const actor of fighters) Object.assign(actor, { x: actor.homeX, y: actor.homeY, hp: actor === player ? player.maxHp : 100, mana: actor === player ? player.maxMana : 0, alive: true, kills: 0, step: null, stepTime: 0, respawn: 0, flash: 0, attackCd: rand(.2, .8), aiTimer: rand(.2, 1), aim: null, skillCooldowns: [0, 0, 0] });
     floatingTexts.length = 0; spellEffects.length = 0;
     selected = 'luna'; selectedSkill = null; kills = 0; remaining = 180; elapsed = 0; gameOver = false; paused = false; keys.clear();
+    Object.assign(potionInventory, INITIAL_POTIONS);
     refreshSkillSelection();
     $('resultPanel').classList.add('hidden'); $('battleLog').innerHTML = '<div class="empty-log">Las hazañas de la arena aparecerán aquí.</div>';
     $('killFeed').innerHTML = '<div class="feed-line"><span class="feed-gold">✦</span> <b>La arena te espera</b><span>—</span> buena suerte, viajero.</div>';
@@ -609,6 +637,8 @@
     }
     if (key === 'enter' || key === 'f') { event.preventDefault(); attack(); return; }
     if (['1', '2', '3'].includes(key)) { selectSkill(Number(key) - 1); return; }
+    if (key === 'q') { usePotion('health'); return; }
+    if (key === 'e') { usePotion('mana'); return; }
     if (key === 'tab') { event.preventDefault(); const next = fighters.filter(f => f !== player && f.alive); if (next.length) selectTarget(next[(next.findIndex(f => f.id === selected) + 1) % next.length]); return; }
     keys.add(key);
   });
@@ -620,6 +650,8 @@
   });
   canvas.addEventListener('contextmenu', event => event.preventDefault());
   $('attackBtn').addEventListener('click', () => attack());
+  $('healthPotion')?.addEventListener('click', () => usePotion('health'));
+  $('manaPotion')?.addEventListener('click', () => usePotion('mana'));
   $('classSelect').addEventListener('change', event => applyClass(event.target.value));
   document.querySelectorAll('.spell-slot').forEach(button => button.addEventListener('click', () => selectSkill(Number(button.dataset.skill))));
   $('scoreboardToggle').addEventListener('click', () => toggleScoreboard());

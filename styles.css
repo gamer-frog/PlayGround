@@ -154,3 +154,16 @@
  .spell-hint{min-width:0;padding-left:3px}
 }
 @media(max-width:430px){.scoreboard-toggle span{display:none}.scoreboard-toggle{width:29px;padding:0;font-size:0}.scoreboard-toggle:first-letter{font-size:16px}}
+
+/* Consumable potion belt */
+.potion-belt{display:flex;align-items:center;gap:5px;flex:none;margin-left:8px;padding-left:8px;border-left:1px solid #343c31}
+.potion-heading{color:#8f9885;font:7px var(--mono);letter-spacing:.7px;white-space:nowrap}
+.potion-slot{position:relative;display:flex;align-items:center;gap:5px;min-width:61px;height:40px;padding:0 20px 0 7px;border:1px solid #3b4436;border-radius:2px;background:#222a22;color:#e4e0ce;font-size:8px;transition:background .15s,border-color .15s,opacity .15s}
+.potion-slot:hover:not(:disabled),.potion-slot:focus-visible{border-color:#bca265;background:#303326;outline:none}
+.potion-slot:disabled{cursor:not-allowed;opacity:.42;filter:saturate(.6)}
+.potion-slot>b{font-size:12px;line-height:1}
+.potion-slot small{position:absolute;top:3px;right:4px;min-width:13px;padding:1px 3px;border:1px solid #6b715e;background:#171d17;color:#e7e5d7;text-align:center;font:7px var(--mono)}
+.potion-health>b{color:#df786b}.potion-mana>b{color:#79b9dc}
+@media(max-width:1050px){.potion-belt{gap:3px;margin-left:4px;padding-left:5px}.potion-heading{display:none}.potion-slot{min-width:54px;padding-left:5px}}
+@media(max-width:760px){.potion-belt{gap:4px;margin-left:0;padding-left:5px}.potion-slot{height:36px;min-width:51px;font-size:7px}}
+@media(max-width:430px){.potion-belt{flex:1 0 100%;justify-content:center;margin-left:0;padding:4px 0 0;border-top:1px solid #343c31;border-left:0}.potion-heading{display:inline}.potion-slot{min-width:75px;height:34px;justify-content:center;padding-left:8px}}

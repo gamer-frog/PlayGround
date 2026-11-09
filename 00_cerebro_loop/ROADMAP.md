@@ -4,21 +4,27 @@
 
 ## 🚀 Funcionalidades Principales
 
-- [ ] Feature A: Descripción breve y criterio de éxito.
-- [ ] Feature B: Descripción breve y criterio de éxito.
+- [x] **Cinturón de pociones** (rescatado de `opencode-checkpoints/18`): dos consumibles, poción roja (+45 vida) y azul (+35 maná), con contador, teclas `Q`/`E`, botones en el HUD y reinicio en "Nueva partida".
+- [ ] **Equipos sagrado/caótico 4v4** (branch 18): convertir la escaramuza libre en dos equipos con clases y objetivos.
+- [ ] **Colocación de NPCs** (branch 18): permitir posicionar combatientes antes de la ronda.
+- [ ] **Puntería visible independiente por NPC** (branch 18): indicador de aim por bot para que el jugador pueda esquivar.
+- [ ] **Puntuación por equipos** (branch 18): marcador de equipo en lugar de bajas individuales.
+- [ ] **Modo 2v2 de NPCs + jugador 3v2** (roadmap visible en `index.html`): objetivo del MVP de combate.
 
 ## 🛠️ Deuda Técnica y Mantenimiento (Tareas [C])
 
-- [ ] Sincronizar `game.js` y `dist/game.js` en todos los commits.
-- [ ] Revisar y agregar `?.` (optional chaining) en todos los accesos a `current` o `state`.
-- [ ] Eliminar `console.log` de producción.
-- [ ] Agregar guards defensivos en todos los accesos a propiedades anidadas.
+- [x] Accesos defensivos en la lógica de pociones (`?? 0`, `?.addEventListener`, guardas de `player`).
+- [ ] Revisar y agregar `?.` (optional chaining) en los accesos restantes a `current`/`state`/`mapData`.
+- [x] `console.log` de producción: no hay ninguno en `game.js` (solo `console.warn`/`console.error` intencionales).
+- [ ] ~~Sincronizar `game.js` y `dist/game.js`~~: obsoleto, no existe `dist/game.js` en este proyecto.
+- [ ] Agregar guards defensivos en accesos a propiedades anidadas (`mapData.tiles[y][x]`) dentro de `isOpen`/dibujo.
 
 ## 🐛 Bugs Conocidos
 
-- [ ] Bug X: Descripción y dónde ocurre.
+- [ ] Ninguno confirmado en el estado verde actual. El `TypeError ... reading 'type'` histórico no se reproduce.
+- [ ] Observación: los NPCs pueden matar al mago muy rápido al inicio de ronda; revisar balance, no es un error de runtime.
 
 ## 📝 Notas
 
-- Agregar nuevas features aquí según se vayan identificando.
-- Priorizar por impacto en el usuario.
+- Priorizar por impacto en el usuario y verificar siempre en navegador antes de pushear.
+- Branch 18 es la fuente más rica; reconstruir por partes compatibles, nunca merge ciego.

@@ -4,17 +4,16 @@
 
 ## Tareas en progreso
 
-- [ ] 🔄 Intento 1/3: [Descripción de la tarea]
-  - Motivo del fallo: [Por qué falló]
-  - Próximo intento: [Qué se va a intentar]
+- [ ] 🔄 Ninguna en este momento. El último ítem (cinturón de pociones) completó y se verificó en el primer intento.
 
 ## Requiere intervención humana
 
-- [ ] 🛑 REQUIERE HUMANO: [Descripción]
-  - Falló 3 veces por: [Motivo]
-  - Contexto: [Información relevante]
+- [ ] 🛑 REQUIERE HUMANO (informativo): eliminar branches `opencode-checkpoints/*` del remoto.
+  - Motivo: es destructivo y varias branches contienen proyectos no relacionados o trabajo paralelo sin verificar.
+  - Contexto: 22 branches; sólo `7,11,14,15,18` pertenecen al juego. No borrar hasta completar el rescate.
 
 ## Ideas pendientes
 
-- [ ] 💡 Idea 1: Descripción breve
-- [ ] 💡 Idea 2: Descripción breve
+- [ ] 💡 Portar el indicador de puntería visible por NPC de la branch 18.
+- [ ] 💡 Añadir guard defensivo `Boolean(mapData && ...)` en `isOpen()`.
+- [ ] 💡 Revisar balance: el mago muere demasiado rápido al inicio de ronda.

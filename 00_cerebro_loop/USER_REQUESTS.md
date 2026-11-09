@@ -4,16 +4,17 @@
 
 ## Pedidos activos
 
-- [ ] 📌 Pedido 1: Descripción del pedido del usuario.
-  - Fecha: [YYYY-MM-DD]
-  - Prioridad: 🔴 Alta / 🟡 Media / 🟢 Baja
-
-- [ ] 📌 Pedido 2: Descripción del pedido del usuario.
-  - Fecha: [YYYY-MM-DD]
-  - Prioridad: 🔴 Alta / 🟡 Media / 🟢 Baja
+- [ ] 📌 Ninguno pendiente. El usuario pidió ejecutar el Gauntlet Loop v2.0 con rescate de tareas y trabajo autónomo continuo.
+  - Fecha: 2026-11-09
+  - Prioridad: 🔴 Alta
+  - Estado: en ejecución (loop activo).
 
 ## Pedidos completados
 
-- [x] ✅ Pedido completado 1: Descripción.
-  - Completado el: [YYYY-MM-DD]
-  - Commit: [hash del commit]
+- [x] ✅ Inicializar el cerebro (`/00_cerebro_loop/`) y la Regla Suprema en `AGENTS.md`.
+  - Completado el: 2026-11-09
+  - Commit: `337bec6`
+
+- [x] ✅ Rescatar e implementar el cinturón de pociones desde `opencode-checkpoints/18`.
+  - Completado el: 2026-11-09
+  - Commit: (ver commit de esta sesión)
