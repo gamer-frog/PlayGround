@@ -18,6 +18,7 @@
 - [x] `console.log` de producción: no hay ninguno en `game.js` (solo `console.warn`/`console.error` intencionales).
 - [ ] ~~Sincronizar `game.js` y `dist/game.js`~~: obsoleto, no existe `dist/game.js` en este proyecto.
 - [x] Guard defensivo en `isOpen()`: valida `mapData?.tiles`, límites y existencia del tile (`tiles[y]?.[x]`) antes de leer `.b`.
+- [x] Documentar teclas de poción (`Q`/`E`) en el modal de controles.
 
 ## 🐛 Bugs Conocidos
 
