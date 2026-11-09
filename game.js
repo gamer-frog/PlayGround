@@ -150,7 +150,13 @@
     }
     return [x, y];
   }
-  function isOpen(x, y) { return x >= 0 && y >= 0 && x < mapData.width && y < mapData.height && !mapData.tiles[y][x].b; }
+  function isOpen(x, y) {
+    const tiles = mapData?.tiles;
+    if (!tiles) return false;
+    if (x < 0 || y < 0 || x >= mapData.width || y >= mapData.height) return false;
+    const tile = tiles[y]?.[x];
+    return Boolean(tile) && !tile.b;
+  }
   function pos(actor) { return actor.step ? actor.step.from : [actor.x, actor.y]; }
   function actorTile(actor) { return actor.step ? actor.step.to : [actor.x, actor.y]; }
   function distance(a, b) { const [ax, ay] = actorTile(a), [bx, by] = actorTile(b); return Math.abs(ax - bx) + Math.abs(ay - by); }

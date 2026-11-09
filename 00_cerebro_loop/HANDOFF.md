@@ -1,13 +1,10 @@
 # HANDOFF (Estado Actual)
 
 ## Última acción completada
-Rescate e implementación del **cinturón de pociones** de `opencode-checkpoints/18` en `main`, reconstruido de forma compatible (sin merge ciego). Poción roja `♥` (+45 vida) y azul `✦` (+35 maná), contador 3/3, teclas `Q`/`E`, botones en el HUD y reinicio en "Nueva partida".
+Guard defensivo en `isOpen()` (`mapData?.tiles`, límites y `tiles[y]?.[x]`), para evitar `TypeError` si el mapa o un tile no existen. Verificado en navegador tras recargar y mover al personaje.
 
 ## Estado del build/navegador
-🟢 Verde. Chromium abierto en `http://localhost:3002`, consola con 0 mensajes / 0 errores / 0 warnings. Probado en escritorio (1050×768) y móvil (390×844), sin overflow horizontal.
-- Poción roja: 3→2, cura 45, toast correcto.
-- Poción azul: 3→2, restaura 35 (capeado), toast correcto.
-- Ambas deshabilitadas con recurso al máximo; "Nueva partida" restaura 3/3.
+🟢 Verde. Chromium en `http://localhost:3002` con 0 errores / 0 warnings. Cinturón de pociones operativo (3/3, Q/E, reinicio) y `isOpen` robusto.
 
 ## Decisiones de diseño tomadas
 - Se usó `Object.freeze(INITIAL_POTIONS)` + copia mutable, para reiniciar el inventario sin duplicar números mágicos.
@@ -17,7 +14,7 @@ Rescate e implementación del **cinturón de pociones** de `opencode-checkpoints
 - No se reemplazaron `game.js`/`index.html`/`styles.css` con los de la branch 18; se portó sólo la feature.
 
 ## PRÓXIMO PASO INMEDIATO
-🚀 Continuar el rescate de la branch 18 por partes: siguiente candidato de bajo riesgo = guard defensivo `isOpen()` (`Boolean(mapData && ...)`) o el indicador de puntería de NPCs. Reconstruir, verificar en navegador y pushear.
+🚀 Evaluar el rescate de la IA de NPCs de la branch 18 (auto-curación, retirada y hechizos a distancia) como feature autocontenida. Los equipos 4v4 quedan como épica mayor que requiere actualizar ACTORS, HUD y puntuación.
 
 ## Contexto importante
 - Worktree de trabajo: `/tmp/opencode/foundation` en `foundation/00-cerebro-loop`; `main` local sigue a `origin/main`.

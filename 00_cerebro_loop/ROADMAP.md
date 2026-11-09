@@ -17,7 +17,7 @@
 - [ ] Revisar y agregar `?.` (optional chaining) en los accesos restantes a `current`/`state`/`mapData`.
 - [x] `console.log` de producción: no hay ninguno en `game.js` (solo `console.warn`/`console.error` intencionales).
 - [ ] ~~Sincronizar `game.js` y `dist/game.js`~~: obsoleto, no existe `dist/game.js` en este proyecto.
-- [ ] Agregar guards defensivos en accesos a propiedades anidadas (`mapData.tiles[y][x]`) dentro de `isOpen`/dibujo.
+- [x] Guard defensivo en `isOpen()`: valida `mapData?.tiles`, límites y existencia del tile (`tiles[y]?.[x]`) antes de leer `.b`.
 
 ## 🐛 Bugs Conocidos
 
