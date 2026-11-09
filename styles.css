@@ -167,3 +167,4 @@
 @media(max-width:1050px){.potion-belt{gap:3px;margin-left:4px;padding-left:5px}.potion-heading{display:none}.potion-slot{min-width:54px;padding-left:5px}}
 @media(max-width:760px){.potion-belt{gap:4px;margin-left:0;padding-left:5px}.potion-slot{height:36px;min-width:51px;font-size:7px}}
 @media(max-width:430px){.potion-belt{flex:1 0 100%;justify-content:center;margin-left:0;padding:4px 0 0;border-top:1px solid #343c31;border-left:0}.potion-heading{display:inline}.potion-slot{min-width:75px;height:34px;justify-content:center;padding-left:8px}}
+.potion-slot kbd{position:absolute;bottom:3px;right:4px;min-width:12px;padding:0 2px;border:1px solid #5b634f;border-radius:1px;background:#171d17;color:#d9d3bd;text-align:center;font:6px/12px var(--mono)}

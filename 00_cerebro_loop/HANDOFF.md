@@ -1,7 +1,7 @@
 # HANDOFF (Estado Actual)
 
 ## Última acción completada
-Guard defensivo en `isOpen()` y documentación de las teclas de poción (`Q`/`E`) en el modal de controles. Verificado en navegador (modal muestra la fila, consola limpia).
+Guard defensivo en `isOpen()`, documentación de `Q`/`E` en el modal y badges de tecla `Q`/`E` sobre los botones de poción. Verificado en navegador (consola limpia, sin overflow en 320–1050 px).
 
 ## Estado del build/navegador
 🟢 Verde. Chromium en `http://localhost:3002` con 0 errores / 0 warnings. Cinturón de pociones operativo (3/3, Q/E, reinicio) y `isOpen` robusto.

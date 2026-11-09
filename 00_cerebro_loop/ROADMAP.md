@@ -19,6 +19,7 @@
 - [ ] ~~Sincronizar `game.js` y `dist/game.js`~~: obsoleto, no existe `dist/game.js` en este proyecto.
 - [x] Guard defensivo en `isOpen()`: valida `mapData?.tiles`, límites y existencia del tile (`tiles[y]?.[x]`) antes de leer `.b`.
 - [x] Documentar teclas de poción (`Q`/`E`) en el modal de controles.
+- [x] Mostrar badges de tecla `Q`/`E` en los botones de poción, con títulos que indican el efecto exacto (+45 vida / +35 maná).
 
 ## 🐛 Bugs Conocidos
 
